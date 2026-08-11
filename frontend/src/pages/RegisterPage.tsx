@@ -1,0 +1,55 @@
+import { useState, type FormEvent } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { apiClient, errorMessage } from "../api/client";
+
+export function RegisterPage() {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      await apiClient.post("/auth/register", { email, password, fullName });
+      navigate("/login");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="centered-auth">
+      <div className="card auth-card">
+        <h1>Create account</h1>
+        {error && <div className="error-banner">{error}</div>}
+        <form onSubmit={handleSubmit}>
+          <div className="form-row">
+            <label>Full name</label>
+            <input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+          </div>
+          <div className="form-row">
+            <label>Email</label>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+          </div>
+          <div className="form-row">
+            <label>Password (min 8 characters)</label>
+            <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" minLength={8} required />
+          </div>
+          <button type="submit" disabled={loading} style={{ width: "100%" }}>
+            {loading ? "Creating..." : "Create account"}
+          </button>
+        </form>
+        <p className="muted" style={{ marginTop: 12 }}>
+          Already have an account? <Link to="/login">Sign in</Link>
+        </p>
+      </div>
+    </div>
+  );
+}

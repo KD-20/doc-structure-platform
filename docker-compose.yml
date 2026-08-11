@@ -1,0 +1,78 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-docstructure}
+      POSTGRES_USER: ${POSTGRES_USER:-docstructure}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docstructure}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Host port 5433, not 5432: avoids clashing with any pre-existing local Postgres.
+      # Only relevant for host-side tools (mvn test, psql); the "app" container talks to
+      # this service over the internal docker network as db:5432 regardless.
+      - "${HOST_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docstructure} -d ${POSTGRES_DB:-docstructure}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-docstructure}
+      # app_user (non-superuser) — see docs/DECISIONS.md for why RLS requires this over
+      # POSTGRES_USER. This same value is also the Flyway placeholder that creates the role.
+      SPRING_DATASOURCE_USERNAME: app_user
+      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD:-app_user_change_me}
+      SPRING_FLYWAY_USER: ${POSTGRES_USER:-docstructure}
+      SPRING_FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-docstructure}
+      PLATFORM_JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-before-any-non-local-use-0123456789}
+      PLATFORM_STORAGE_BASE_PATH: /data/documents
+      PLATFORM_BOOTSTRAP_ENABLED: ${BOOTSTRAP_ENABLED:-true}
+      PLATFORM_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      PLATFORM_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-ChangeMe123!}
+      # Off by default — guest-link creation still works without these, just without the
+      # "email it to someone" option (falls back to "copy the link" in the UI). Set
+      # MAIL_ENABLED=true plus real SMTP_* values in .env to turn it on. See README.
+      PLATFORM_MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      PLATFORM_MAIL_FROM: ${MAIL_FROM:-no-reply@example.com}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # Off by default, and even once on, no tenant uses it until it opts in via
+      # tenant.settings.extractionStrategy="LLM" — the platform-wide default stays
+      # RULE_BASED (see application.yml). Set LLM_ENABLED=true + GROQ_API_KEY in .env.
+      PLATFORM_EXTRACTION_LLM_ENABLED: ${LLM_ENABLED:-false}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      # Real semantic search. Off by default (NoOpEmbeddingProvider). Set
+      # EMBEDDINGS_ENABLED=true + GEMINI_API_KEY in .env to turn it on.
+      PLATFORM_EMBEDDINGS_ENABLED: ${EMBEDDINGS_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+    volumes:
+      - documents_storage:/data/documents
+    ports:
+      # Default 8081, not 8080: avoids clashing with other services commonly already running
+      # on 8080 in local dev. Override with HOST_APP_PORT if 8081 is also taken.
+      - "${HOST_APP_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  pgdata:
+  documents_storage:

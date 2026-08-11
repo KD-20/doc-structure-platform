@@ -1,0 +1,10 @@
+ACME Supplies Inc.
+Invoice Number: INV-2024-0088
+Date: 03/14/2026
+Bill To: Contoso Ltd
+
+Line Items
+Widget A    2   10.00   20.00
+Widget B    1   50.00   50.00
+
+Total: $70.00

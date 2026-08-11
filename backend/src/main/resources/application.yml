@@ -1,0 +1,118 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: doc-structure-platform
+  autoconfigure:
+    exclude:
+      # We authenticate via JwtAuthFilter/GuestAuthFilter, not a UserDetailsService.
+      - org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+  datasource:
+    # Runtime JDBC connection used by Hibernate/JPA. MUST be the non-superuser app_user
+    # role (created by V1__init_schema.sql) — row-level security tenant isolation is a
+    # no-op for superusers, even with FORCE ROW LEVEL SECURITY. See docs/DECISIONS.md.
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/docstructure}
+    username: ${SPRING_DATASOURCE_USERNAME:app_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:app_user_change_me}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # Migrations run as the Postgres superuser (needed to CREATE EXTENSION / CREATE ROLE),
+    # deliberately separate from the app_user runtime connection above.
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/docstructure}
+    user: ${SPRING_FLYWAY_USER:docstructure}
+    password: ${SPRING_FLYWAY_PASSWORD:docstructure}
+    placeholders:
+      appDbPassword: ${SPRING_DATASOURCE_PASSWORD:app_user_change_me}
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 25MB
+  mail:
+    # Only ever actually used by SmtpEmailService, which itself only registers as a bean when
+    # platform.mail.enabled=true — an empty SMTP_HOST here is harmless (JavaMailSenderImpl
+    # doesn't connect at boot) as long as nothing tries to send through it, which nothing does
+    # by default. See docs/DECISIONS.md and README for how to actually enable this.
+    host: ${SMTP_HOST:}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+  health:
+    # Actuator auto-registers a mail health check whenever a JavaMailSender bean exists — and
+    # spring.mail.host being merely *present* (even as an empty string, our unconfigured
+    # default) is enough for that bean to exist regardless of platform.mail.enabled. Left on,
+    # it actively tries to connect to SMTP on every /actuator/health call and drags the whole
+    # endpoint (and therefore the Docker healthcheck) to DOWN when SMTP isn't set up. This is
+    # a separate concern from platform.mail.enabled, which independently gates whether
+    # SmtpEmailService itself is registered/usable.
+    mail:
+      enabled: false
+
+springdoc:
+  swagger-ui:
+    path: /api-docs
+
+platform:
+  jwt:
+    secret: ${PLATFORM_JWT_SECRET:dev-only-secret-change-me-dev-only-secret-change-me}
+    access-token-minutes: ${PLATFORM_JWT_ACCESS_MINUTES:60}
+  extraction:
+    # Platform-wide default stays RULE_BASED even once LLM is enabled below — existing tenants
+    # with tuned rule sets (anchor text, table columns, normalizers) keep that precise
+    # behavior. A tenant opts into LLM per-tenant via PATCH .../settings {"extractionStrategy":"LLM"}.
+    default-strategy: ${PLATFORM_EXTRACTION_DEFAULT_STRATEGY:RULE_BASED}
+    llm:
+      enabled: ${PLATFORM_EXTRACTION_LLM_ENABLED:false}
+      api-key: ${GROQ_API_KEY:}
+      model: ${GROQ_MODEL:llama-3.3-70b-versatile}
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+  embeddings:
+    # Real semantic search: GeminiEmbeddingProvider takes over from NoOpEmbeddingProvider once
+    # enabled. outputDimensionality is pinned to 1536 to match the existing
+    # extracted_data.embedding VECTOR(1536) column — no migration needed.
+    enabled: ${PLATFORM_EMBEDDINGS_ENABLED:false}
+    api-key: ${GEMINI_API_KEY:}
+    model: ${GEMINI_EMBEDDING_MODEL:gemini-embedding-001}
+    base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
+  mail:
+    enabled: ${PLATFORM_MAIL_ENABLED:false}
+    from: ${PLATFORM_MAIL_FROM:no-reply@example.com}
+  storage:
+    base-path: ${PLATFORM_STORAGE_BASE_PATH:./data/documents}
+  bootstrap:
+    enabled: ${PLATFORM_BOOTSTRAP_ENABLED:true}
+    admin-email: ${PLATFORM_BOOTSTRAP_ADMIN_EMAIL:admin@example.com}
+    admin-password: ${PLATFORM_BOOTSTRAP_ADMIN_PASSWORD:ChangeMe123!}
+    tenant-name: ${PLATFORM_BOOTSTRAP_TENANT_NAME:Demo Tenant}
+    tenant-slug: ${PLATFORM_BOOTSTRAP_TENANT_SLUG:demo}
+  public-demo:
+    # The shared, unauthenticated "try it before you subscribe" tenant — see
+    # PublicDemoInitializer/PublicDemoService. On by default; set to false to turn off
+    # anonymous uploads entirely (e.g. before a real public deployment without the abuse
+    # guardrails — rate limiting, captcha — that a genuinely public endpoint would need).
+    enabled: ${PLATFORM_PUBLIC_DEMO_ENABLED:true}
+    max-uploads-per-device: ${PLATFORM_PUBLIC_DEMO_MAX_UPLOADS:5}

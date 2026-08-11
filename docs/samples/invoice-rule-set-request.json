@@ -1,0 +1,20 @@
+{
+  "definition": {
+    "docType": "invoice",
+    "fields": [
+      {"name":"invoice_number","type":"string","required":true,
+       "strategy":"ANCHOR_REGEX",
+       "params":{"anchorText":"Invoice Number:","anchorMode":"NEAREST_FOLLOWING","searchWindowChars":50,"pattern":"([A-Z]{2,4}-\\d{4}-\\d{4,8})"}},
+      {"name":"invoice_date","type":"date","required":true,
+       "strategy":"ANCHOR_REGEX","params":{"anchorText":"Date:","searchWindowChars":50,"pattern":"(\\d{1,2}/\\d{1,2}/\\d{4})"},
+       "normalizer":{"type":"DATE","params":{"inputFormats":["MM/dd/yyyy"]}}},
+      {"name":"total_amount","type":"decimal","required":true,
+       "strategy":"ANCHOR_REGEX","params":{"anchorText":"Total:","searchWindowChars":30,"pattern":"\\$?([\\d,]+\\.\\d{2})"},
+       "normalizer":{"type":"CURRENCY","params":{"stripSymbols":true}}},
+      {"name":"line_items","type":"table","required":false,
+       "strategy":"TABLE_UNDER_HEADING","params":{"headingText":"Line Items","columns":["description","qty","unit_price","amount"]}},
+      {"name":"purchase_order","type":"string","required":false,
+       "strategy":"REGEX_GLOBAL","params":{"pattern":"(PO-\\d+)"}}
+    ]
+  }
+}
