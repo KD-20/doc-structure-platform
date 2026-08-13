@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { apiClient, errorMessage, getAuthToken } from "../api/client";
-import type { DocumentStatus, DocumentSummary, EffectiveRuleSet, Page } from "../api/types";
+import type { DocumentStatus, DocumentSummary, EffectiveRuleSet, ExtractionRun, Page } from "../api/types";
 import { StatusPill } from "../components/StatusPill";
 import { DocumentThumbnail } from "../components/DocumentThumbnail";
+import { PipelineSteps } from "../components/PipelineSteps";
 import { TypeaheadInput } from "../components/TypeaheadInput";
 import { RefreshIcon, UploadIcon } from "../components/icons";
 import { formatCategoryForDocType, formatCategoryForFilename, formatLabel } from "../utils/docTypeFormat";
+import { displayStatus } from "../utils/documentDisplayStatus";
 import { useAuth } from "../auth/AuthContext";
 import { isAdminRole, isEditorRole } from "../auth/roles";
 
@@ -49,16 +51,54 @@ export function DocumentsPage() {
 
   const [retriggeringDocId, setRetriggeringDocId] = useState<string | null>(null);
 
+  // Only one status dropdown open at a time; its run history is fetched the first time it
+  // opens (and refetched live whenever an SSE event arrives for that same document while
+  // it's open — see the document-status listener below).
+  const [openStatusDocId, setOpenStatusDocId] = useState<string | null>(null);
+  const [historyByDoc, setHistoryByDoc] = useState<Record<string, ExtractionRun[]>>({});
+  const [loadingHistoryFor, setLoadingHistoryFor] = useState<string | null>(null);
+
   useEffect(() => {
     function closeOnOutsideClick(e: globalThis.MouseEvent) {
       const target = e.target as Element;
       if (!target.closest(".doctype-menu")) {
         setDocTypeMenuOpen(false);
       }
+      if (!target.closest(".history-dropdown")) {
+        setOpenStatusDocId(null);
+      }
     }
     document.addEventListener("mousedown", closeOnOutsideClick);
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, []);
+
+  async function loadHistory(docId: string) {
+    setLoadingHistoryFor(docId);
+    try {
+      const { data } = await apiClient.get<ExtractionRun[]>(`/tenants/${tenantId}/documents/${docId}/extraction-runs`);
+      setHistoryByDoc((prev) => ({ ...prev, [docId]: data }));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoadingHistoryFor((cur) => (cur === docId ? null : cur));
+    }
+  }
+
+  function toggleStatusDropdown(docId: string) {
+    if (openStatusDocId === docId) {
+      setOpenStatusDocId(null);
+      return;
+    }
+    setOpenStatusDocId(docId);
+    loadHistory(docId);
+  }
+
+  // Read inside the SSE handler below, which is set up once per tenantId and would otherwise
+  // close over whatever openStatusDocId was at connection time, not its current value.
+  const openStatusDocIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    openStatusDocIdRef.current = openStatusDocId;
+  }, [openStatusDocId]);
 
   // Suggestions only (a <datalist>, not a hard-restricted <select>) for the optional
   // upload-time override — "effective" doc types are every one extraction can actually use
@@ -101,10 +141,11 @@ export function DocumentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, docTypeFilter, pageNumber]);
 
-  // Live status updates instead of needing a manual refresh — processing itself is
-  // synchronous (see docs/DECISIONS.md), so this isn't polling a background job; it's so
-  // *other* tabs/users viewing this tenant's documents see a change the moment it happens
-  // (e.g. someone else re-running extraction), not just the tab that triggered it.
+  // Live status updates instead of needing a manual refresh — structured extraction now runs
+  // asynchronously in the background (see ExtractionService#enqueueExtraction), so a document
+  // can genuinely sit at PENDING/RUNNING for a little while; this is what makes that visible in
+  // real time, both to *other* tabs/users viewing this tenant's documents and to whichever
+  // status dropdown (see toggleStatusDropdown) happens to be open when a run finishes.
   // EventSource can't send an Authorization header, so the token travels as a query param
   // instead — see JwtAuthFilter's query-param fallback.
   useEffect(() => {
@@ -128,12 +169,39 @@ export function DocumentsPage() {
           ),
         };
       });
+      if (openStatusDocIdRef.current === payload.documentId) {
+        loadHistory(payload.documentId);
+      }
+    });
+    // A run starting doesn't touch the document's own `status` at all (PENDING/RUNNING have no
+    // DocumentStatus counterpart) — without this, there'd be no live signal a job is in flight
+    // until it finishes, for anyone who didn't personally trigger it. See
+    // DocumentEventService#publishExtractionStatus on the backend.
+    source.addEventListener("extraction-status", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        documentId: string;
+        runStatus: DocumentSummary["latestExtractionRunStatus"];
+      };
+      setPage((prev) => {
+        if (!prev || !prev.content.some((d) => d.id === payload.documentId)) return prev;
+        return {
+          ...prev,
+          content: prev.content.map((d) =>
+            d.id === payload.documentId ? { ...d, latestExtractionRunStatus: payload.runStatus } : d,
+          ),
+        };
+      });
+      if (openStatusDocIdRef.current === payload.documentId) {
+        loadHistory(payload.documentId);
+      }
     });
     // Connection drops (e.g. server restart) are expected occasionally — EventSource
     // reconnects on its own; nothing to handle here beyond not crashing the page.
     source.onerror = () => {};
     return () => source.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId]);
+
 
   function handleFilterChange(value: string) {
     setDocTypeFilter(value);
@@ -145,11 +213,14 @@ export function DocumentsPage() {
     setRetriggeringDocId(docId);
     setError(null);
     try {
+      // Async now (see ExtractionService#enqueueExtraction) — this returns as soon as a
+      // PENDING run exists, not once it's finished. Refreshing the list here just shows that
+      // PENDING/RUNNING state immediately; the eventual SUCCEEDED/FAILED transition arrives via
+      // the SSE stream above. Opening the status dropdown lets the user actually watch it happen.
       await apiClient.post(`/tenants/${tenantId}/documents/${docId}/extraction-runs`);
-      // Refreshes this row's status — processing itself is synchronous (see
-      // docs/DECISIONS.md), so by the time this call returns the outcome is already final;
-      // this is what "progress" looks like here, not a queue to poll.
       await load();
+      setOpenStatusDocId(docId);
+      await loadHistory(docId);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -188,7 +259,7 @@ export function DocumentsPage() {
     const actualCategory = formatCategoryForFilename(file.name);
     if (expectedCategory && actualCategory && expectedCategory !== actualCategory) {
       setError(
-        `"${docTypeOverride.trim()}" expects a ${formatLabel(expectedCategory)} file, but "${file.name}" looks like a ${formatLabel(actualCategory)}. Pick the matching type, or leave it blank to auto-detect.`,
+        `"${docTypeOverride.trim()}" expects a ${formatLabel(expectedCategory)} file, but "${file.name}" looks like a ${formatLabel(actualCategory)}. Pick the matching type, or leave it blank to upload as unstructured.`,
       );
       return;
     }
@@ -276,11 +347,14 @@ export function DocumentsPage() {
 
           <div style={{ display: "flex", gap: 12, alignItems: "flex-end", marginTop: 16 }}>
             <div className="form-row" style={{ flex: 1, marginBottom: 0, maxWidth: 260 }}>
-              <label>Document type (optional — leave blank to auto-detect)</label>
+              <label>
+                Document type (optional — leave blank to upload it unstructured; we won't guess a
+                type, but it still gets indexed for search)
+              </label>
               <TypeaheadInput
                 value={docTypeOverride}
                 onChange={setDocTypeOverride}
-                placeholder="auto-detect"
+                placeholder="unstructured"
                 // Both sources: types extraction can already use (rule sets, custom or
                 // default) and types already sitting on real documents in this tenant — the
                 // latter can include ones with no rule set at all (e.g. a generic
@@ -397,6 +471,8 @@ export function DocumentsPage() {
             </thead>
             <tbody>
               {page?.content.map((d) => {
+                const isStatusOpen = openStatusDocId === d.id;
+                const history = historyByDoc[d.id];
                 return (
                   <tr key={d.id}>
                     <td title={d.filename}>
@@ -421,7 +497,47 @@ export function DocumentsPage() {
                       )}
                     </td>
                     <td>
-                      <StatusPill status={d.status} />
+                      <div className="history-dropdown">
+                        <button
+                          type="button"
+                          className="status-dropdown-toggle"
+                          title="View live processing status"
+                          onClick={() => toggleStatusDropdown(d.id)}
+                        >
+                          <StatusPill status={displayStatus(d)} />
+                          <span className="expand-chevron">{isStatusOpen ? "▲" : "▾"}</span>
+                        </button>
+                        {isStatusOpen && (
+                          <div className="history-dropdown-panel">
+                            <div className="history-dropdown-panel-header">
+                              <span className="muted" style={{ fontSize: 12 }}>
+                                Live status
+                              </span>
+                              <button
+                                className="icon-btn secondary"
+                                title="Close"
+                                onClick={() => setOpenStatusDocId(null)}
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <PipelineSteps status={d.status} latestRun={history?.[0]} />
+                            {(loadingHistoryFor === d.id || (history && history.length > 0)) && (
+                              <div className="history-dropdown-divider" />
+                            )}
+                            {loadingHistoryFor === d.id && <span className="muted">Loading history…</span>}
+                            {history?.map((r) => (
+                              <div className="history-dropdown-row" key={r.id} title={r.errorMessage ?? undefined}>
+                                <span>{r.strategy}</span>
+                                <StatusPill status={r.status} />
+                                <span className="muted">
+                                  {r.startedAt ? new Date(r.startedAt).toLocaleDateString() : "-"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td>
                       <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>

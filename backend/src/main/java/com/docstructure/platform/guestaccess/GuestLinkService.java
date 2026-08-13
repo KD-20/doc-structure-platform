@@ -6,6 +6,8 @@ import com.docstructure.platform.common.TenantScoped;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,6 +19,8 @@ import java.util.UUID;
 
 @Service
 public class GuestLinkService {
+
+    private static final Logger log = LoggerFactory.getLogger(GuestLinkService.class);
 
     private final GuestShareLinkRepository repository;
     private final GuestTokenService tokenService;
@@ -47,6 +51,8 @@ public class GuestLinkService {
         link.setExpiresAt(expiresAt);
         link.setMaxUses(maxUses);
         link = repository.save(link);
+        log.info("guest link created id={} tenant={} documents={} expiresAt={} maxUses={}", link.getId(), tenantId,
+                documentIds.size(), expiresAt, maxUses);
         return new CreatedGuestLink(link, rawToken);
     }
 
@@ -64,13 +70,23 @@ public class GuestLinkService {
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Guest link not found"));
         link.setRevokedAt(Instant.now());
         repository.save(link);
+        log.info("guest link revoked id={} tenant={}", linkId, tenantId);
     }
 
     /** Not tenant-scoped: the tenant is unknown until this lookup succeeds — see GuestShareLinkRepository. */
     @Transactional(readOnly = true)
     public Optional<GuestShareLink> findUsableByToken(String rawToken) {
-        return repository.findByTokenHashBypassingRls(tokenService.hash(rawToken))
-                .filter(link -> link.isUsable(Instant.now()));
+        Optional<GuestShareLink> found = repository.findByTokenHashBypassingRls(tokenService.hash(rawToken));
+        if (found.isEmpty()) {
+            log.debug("guest token lookup: no matching link");
+            return Optional.empty();
+        }
+        if (!found.get().isUsable(Instant.now())) {
+            log.debug("guest token lookup: link={} exists but is not usable (expired/revoked/exhausted)",
+                    found.get().getId());
+            return Optional.empty();
+        }
+        return found;
     }
 
     /**
@@ -85,6 +101,7 @@ public class GuestLinkService {
         repository.findById(linkId).ifPresent(link -> {
             link.setUseCount(link.getUseCount() + 1);
             repository.save(link);
+            log.debug("guest link used id={} tenant={} useCount={}", linkId, tenantId, link.getUseCount());
         });
     }
 

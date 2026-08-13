@@ -58,6 +58,11 @@ export interface DocumentSummary {
   fileSizeBytes: number;
   status: DocumentStatus;
   createdAt: string;
+  // null when no extraction run has ever existed for this document. Can legitimately disagree
+  // with `status` — e.g. status: TEXT_EXTRACTED + latestExtractionRunStatus: SUCCEEDED means a
+  // run completed but found no matching rule set (searchable, nothing structured), not "hasn't
+  // been processed yet". See DocumentSummaryResponse's own javadoc on the backend.
+  latestExtractionRunStatus: ExtractionRunStatus | null;
 }
 
 export interface Page<T> {
@@ -144,7 +149,7 @@ export interface ExtractedData {
 
 export interface SearchFilter {
   field: string;
-  op: "eq" | "contains" | "gt" | "gte" | "lt" | "lte";
+  op: "eq" | "contains" | "fuzzy" | "gt" | "gte" | "lt" | "lte";
   value: string;
 }
 

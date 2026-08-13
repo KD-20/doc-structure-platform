@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { apiClient, errorMessage } from "../api/client";
+import { apiClient, errorMessage, getAuthToken } from "../api/client";
 import type { DocumentSummary, EffectiveRuleSet, ExtractedData, ExtractionRun } from "../api/types";
 import { StatusPill } from "../components/StatusPill";
 import { FieldsTable } from "../components/FieldsTable";
@@ -9,6 +9,7 @@ import { TypeaheadInput } from "../components/TypeaheadInput";
 import { DownloadIcon, RefreshIcon, TrashIcon } from "../components/icons";
 import { useAuth } from "../auth/AuthContext";
 import { isAdminRole, isEditorRole } from "../auth/roles";
+import { displayStatus } from "../utils/documentDisplayStatus";
 
 export function DocumentDetailPage() {
   const { tenantId, documentId } = useParams();
@@ -53,6 +54,31 @@ export function DocumentDetailPage() {
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, documentId]);
+
+  // Same live-update problem as the Documents list (see DocumentsPage), one document instead of
+  // a whole page: without this, a job that's still PENDING/RUNNING when this page loads (or
+  // starts while it's open — triggered from another tab, or by someone else) never visibly
+  // changes until a manual reload. Just refetches everything on any relevant event rather than
+  // patching individual fields — there's only one document here, so the simpler approach is
+  // cheap enough and keeps runs/extracted-data in sync too, not just the status pill.
+  useEffect(() => {
+    if (!tenantId || !documentId) return;
+    const token = getAuthToken();
+    const source = new EventSource(
+      `/api/tenants/${tenantId}/documents/events${token ? `?token=${encodeURIComponent(token)}` : ""}`,
+    );
+    const onRelevantEvent = (event: Event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as { documentId: string };
+      if (payload.documentId === documentId) {
+        load();
+      }
+    };
+    source.addEventListener("document-status", onRelevantEvent);
+    source.addEventListener("extraction-status", onRelevantEvent);
+    source.onerror = () => {};
+    return () => source.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, documentId]);
 
@@ -216,7 +242,8 @@ export function DocumentDetailPage() {
                 )}
               </>
             )}
-            &nbsp; Status: <StatusPill status={doc.status} /> &nbsp; Size: {(doc.fileSizeBytes / 1024).toFixed(1)} KB
+            &nbsp; Status: <StatusPill status={displayStatus(doc)} /> &nbsp; Size:{" "}
+            {(doc.fileSizeBytes / 1024).toFixed(1)} KB
           </p>
 
           <button className="secondary" onClick={loadRawText}>

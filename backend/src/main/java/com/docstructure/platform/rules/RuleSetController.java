@@ -1,6 +1,7 @@
 package com.docstructure.platform.rules;
 
 import com.docstructure.platform.auth.AppPrincipal;
+import com.docstructure.platform.extraction.BulkReextractionService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -22,9 +23,11 @@ import java.util.UUID;
 public class RuleSetController {
 
     private final RuleSetService ruleSetService;
+    private final BulkReextractionService bulkReextractionService;
 
-    public RuleSetController(RuleSetService ruleSetService) {
+    public RuleSetController(RuleSetService ruleSetService, BulkReextractionService bulkReextractionService) {
         this.ruleSetService = ruleSetService;
+        this.bulkReextractionService = bulkReextractionService;
     }
 
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('VIEWER')")
@@ -63,15 +66,30 @@ public class RuleSetController {
                                                            @Valid @RequestBody CreateRuleSetVersionRequest request,
                                                            @AuthenticationPrincipal AppPrincipal principal) {
         ExtractionRuleSet rs = ruleSetService.createVersion(tenantId, docType, request.definition(), principal.userId());
+        bulkReextractionService.reextractByDocType(tenantId, docType, principal.userId());
         return ResponseEntity.status(HttpStatus.CREATED).body(RuleSetResponse.from(rs, request.definition()));
     }
 
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('ADMIN')")
     @PostMapping("/{docType}/versions/{version}/activate")
     public RuleSetResponse activate(@PathVariable UUID tenantId, @PathVariable String docType,
-                                     @PathVariable int version) {
+                                     @PathVariable int version, @AuthenticationPrincipal AppPrincipal principal) {
         ExtractionRuleSet rs = ruleSetService.activateVersion(tenantId, docType, version);
+        bulkReextractionService.reextractByDocType(tenantId, docType, principal.userId());
         return RuleSetResponse.from(rs, ruleSetService.parseDefinition(rs));
+    }
+
+    /**
+     * Manual counterpart to the automatic re-extraction createVersion/activate already trigger
+     * — for re-syncing existing documents without changing the rule set itself (e.g. after
+     * fixing something unrelated, or just to confirm the current definition still behaves as
+     * expected against what's already uploaded).
+     */
+    @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('EDITOR')")
+    @PostMapping("/{docType}/reextract")
+    public BulkReextractionService.Result reextract(@PathVariable UUID tenantId, @PathVariable String docType,
+                                                      @AuthenticationPrincipal AppPrincipal principal) {
+        return bulkReextractionService.reextractByDocType(tenantId, docType, principal.userId());
     }
 
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('EDITOR')")

@@ -1,5 +1,7 @@
 package com.docstructure.platform.storage;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -15,6 +17,8 @@ import java.util.UUID;
 @Service
 public class LocalDiskStorageService implements StorageService {
 
+    private static final Logger log = LoggerFactory.getLogger(LocalDiskStorageService.class);
+
     private final Path basePath;
 
     public LocalDiskStorageService(@Value("${platform.storage.base-path}") String basePathConfig) {
@@ -24,6 +28,7 @@ public class LocalDiskStorageService implements StorageService {
         } catch (IOException e) {
             throw new UncheckedIOException("Could not create storage directory " + this.basePath, e);
         }
+        log.info("local disk storage initialized basePath={}", this.basePath);
     }
 
     @Override
@@ -31,7 +36,8 @@ public class LocalDiskStorageService implements StorageService {
         String relativePath = tenantId + "/" + documentId + "__" + sanitize(filename);
         Path target = resolveSafe(relativePath);
         Files.createDirectories(target.getParent());
-        Files.copy(content, target, StandardCopyOption.REPLACE_EXISTING);
+        long bytesWritten = Files.copy(content, target, StandardCopyOption.REPLACE_EXISTING);
+        log.debug("stored file tenant={} path={} bytes={}", tenantId, relativePath, bytesWritten);
         return relativePath;
     }
 
@@ -42,7 +48,8 @@ public class LocalDiskStorageService implements StorageService {
 
     @Override
     public void delete(String storagePath) throws IOException {
-        Files.deleteIfExists(resolveSafe(storagePath));
+        boolean deleted = Files.deleteIfExists(resolveSafe(storagePath));
+        log.debug("delete storagePath={} existed={}", storagePath, deleted);
     }
 
     /** Rejects any path.resolve() result that would escape basePath (covers both write and read). */

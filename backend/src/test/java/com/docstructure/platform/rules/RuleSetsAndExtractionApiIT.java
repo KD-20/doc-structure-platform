@@ -231,6 +231,105 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         assertThat(fields.get(0).get("found")).isEqualTo(false);
     }
 
+    // ---- Bulk re-extraction ----
+
+    @Test
+    void savingARuleSetAutomaticallyReextractsExistingDocumentsOfThatType() {
+        // Uploaded before any rule set exists for this doc type — lands as unstructured (no
+        // fields), same as any no-matching-rule-set document. The point of this test: without
+        // ever calling POST .../extraction-runs directly, saving a rule set afterward should be
+        // enough to pick this document back up and structure it.
+        TenantFixture fixture = createTenantWithOwner();
+        String docType = "it_auto_reextract_" + uniqueSuffix();
+        UUID docId = uploadDoc(fixture, docType);
+
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
+                new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())),
+                Map.class);
+
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
+
+        ResponseEntity<List> dataRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",
+                HttpMethod.GET, new HttpEntity<>(authHeaders(fixture.ownerToken())), List.class);
+        List<Map<String, Object>> extracted = dataRes.getBody();
+        assertThat(extracted).isNotEmpty();
+        Map<String, Object> fields = (Map<String, Object>) extracted.get(0).get("fields");
+        Map<String, Object> invoiceNumber = (Map<String, Object>) fields.get("invoice_number");
+        assertThat(invoiceNumber.get("value")).isEqualTo("INV-9001");
+    }
+
+    @Test
+    void activatingAnOlderVersionAlsoReextractsExistingDocuments() {
+        TenantFixture fixture = createTenantWithOwner();
+        String docType = "it_auto_reextract_activate_" + uniqueSuffix();
+        // v1: real matching field. v2: a field that can't possibly match, so a document
+        // extracted under v2 would have a null value — proves the reextract after activating v1
+        // actually re-ran against v1's definition, not just re-used a stale v2 result.
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
+                new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())),
+                Map.class);
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
+                new HttpEntity<>(Map.of("definition", Map.of("docType", docType, "fields", List.of(
+                        anchorFieldRule("invoice_number", "Nonexistent Label:", "([A-Z]{2,4}-\\d{3,8})")))),
+                        authHeaders(fixture.ownerToken())),
+                Map.class);
+
+        // Explicit docType, so this does NOT auto-trigger at upload time (see DocumentService's
+        // upload javadoc) — this document has genuinely never been extracted until the activate
+        // call below reextracts it.
+        UUID docId = uploadDoc(fixture, docType);
+
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType + "/versions/1/activate",
+                HttpMethod.POST, new HttpEntity<>(null, authHeaders(fixture.ownerToken())), Map.class);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
+
+        ResponseEntity<List> dataRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",
+                HttpMethod.GET, new HttpEntity<>(authHeaders(fixture.ownerToken())), List.class);
+        Map<String, Object> latest = (Map<String, Object>) dataRes.getBody().get(0);
+        Map<String, Object> fields = (Map<String, Object>) latest.get("fields");
+        Map<String, Object> invoiceNumber = (Map<String, Object>) fields.get("invoice_number");
+        assertThat(invoiceNumber.get("value")).isEqualTo("INV-9001");
+    }
+
+    @Test
+    void manualReextractEndpointEnqueuesRunsForEveryDocumentOfThatType() {
+        TenantFixture fixture = createTenantWithOwner();
+        String docType = "it_manual_reextract_" + uniqueSuffix();
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
+                new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())),
+                Map.class);
+        // Both explicit docType, so neither auto-triggers at upload time — both sit unextracted
+        // until the manual reextract call below.
+        UUID docA = uploadDoc(fixture, docType);
+        UUID docB = uploadDoc(fixture, docType);
+
+        ResponseEntity<Map> res = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType + "/reextract",
+                HttpMethod.POST, new HttpEntity<>(null, authHeaders(fixture.ownerToken())), Map.class);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(((Number) res.getBody().get("documentsEnqueued")).intValue()).isEqualTo(2);
+        assertThat(((Number) res.getBody().get("documentsSkipped")).intValue()).isEqualTo(0);
+
+        // See ApiTestBase#waitForTerminalRunStatus's javadoc: any test that triggers extraction
+        // must wait for a terminal status before returning, or @AfterEach cleanup can race a
+        // still-in-flight background worker.
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docA);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docB);
+    }
+
+    @Test
+    void manualReextractDeniedForViewer() {
+        TenantFixture fixture = createTenantWithOwner();
+        String docType = "it_manual_reextract_denied_" + uniqueSuffix();
+        String viewerToken = createMemberWithRole(fixture, fixture.ownerToken(), MembershipRole.VIEWER);
+        ResponseEntity<Map> res = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType + "/reextract",
+                HttpMethod.POST, new HttpEntity<>(null, authHeaders(viewerToken)), Map.class);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
     // ---- Extraction ----
 
     @Test
@@ -241,21 +340,26 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
                 new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())), Map.class);
         UUID docId = uploadDoc(fixture, docType);
 
+        // Async now (see ExtractionService#enqueueExtraction): the POST itself only guarantees
+        // a run was created, not that it finished — 202 + PENDING immediately, poll for the
+        // terminal outcome.
         ResponseEntity<Map> res = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
                 HttpMethod.POST, new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
-        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(res.getBody().get("status")).isEqualTo("SUCCEEDED");
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(res.getBody().get("status")).isEqualTo("PENDING");
+        UUID runId = UUID.fromString((String) res.getBody().get("id"));
+
+        Map<String, Object> finished = waitForTerminalRunStatus(fixture.tenantId(), fixture.ownerToken(), runId);
+        assertThat(finished.get("status")).isEqualTo("SUCCEEDED");
     }
 
     @Test
-    void triggerExtractionWithNoActiveRuleSetSucceedsAtRequestLevelButRunFails() {
-        // ExtractionService.triggerExtraction catches the "no active rule set" NotFoundException
-        // internally and records it as a FAILED ExtractionRun rather than letting it propagate —
-        // per-document failure is tracked data, not a request-level error (initially asserted
-        // this as a 404 here; live run showed 201 with a FAILED run instead, which is the
-        // documented, intentional design: the endpoint's own status code always reflects "the
-        // run record was created," independent of whether the run itself succeeded).
+    void triggerExtractionWithNoActiveRuleSetSucceedsAsUnstructured() {
+        // RuleBasedExtractionStrategy no longer fails when there's no active rule set for this
+        // doc type (custom or platform default) — it returns an UNSTRUCTURED result (no fields)
+        // instead, so the run still SUCCEEDS and the document still gets embedded for
+        // semantic/fuzzy search. See RuleBasedExtractionStrategy's own javadoc.
         TenantFixture fixture = createTenantWithOwner();
         String docType = "it_no_ruleset_" + uniqueSuffix();
         UUID docId = uploadDoc(fixture, docType);
@@ -263,9 +367,26 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         ResponseEntity<Map> res = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
                 HttpMethod.POST, new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
-        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(res.getBody().get("status")).isEqualTo("FAILED");
-        assertThat((String) res.getBody().get("errorMessage")).contains("No active rule set");
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(res.getBody().get("status")).isEqualTo("PENDING");
+        UUID runId = UUID.fromString((String) res.getBody().get("id"));
+
+        Map<String, Object> finished = waitForTerminalRunStatus(fixture.tenantId(), fixture.ownerToken(), runId);
+        assertThat(finished.get("status")).isEqualTo("SUCCEEDED");
+
+        ResponseEntity<Map> docRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId, HttpMethod.GET,
+                new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        // Not STRUCTURED: that specifically means fields were extracted, which didn't happen here.
+        assertThat(docRes.getBody().get("status")).isEqualTo("TEXT_EXTRACTED");
+
+        ResponseEntity<List> dataRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",
+                HttpMethod.GET, new HttpEntity<>(authHeaders(fixture.ownerToken())), List.class);
+        List<Map<String, Object>> data = dataRes.getBody();
+        assertThat(data).hasSize(1);
+        assertThat(data.get(0).get("status")).isEqualTo("UNSTRUCTURED");
+        assertThat((Map<String, Object>) data.get(0).get("fields")).isEmpty();
     }
 
     @Test
@@ -328,8 +449,11 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
                 new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())), Map.class);
         UUID docId = uploadDoc(fixture, docType);
-        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
+        ResponseEntity<Map> triggerRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
                 HttpMethod.POST, new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        UUID runId = UUID.fromString((String) triggerRes.getBody().get("id"));
+        waitForTerminalRunStatus(fixture.tenantId(), fixture.ownerToken(), runId);
 
         ResponseEntity<List> res = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",

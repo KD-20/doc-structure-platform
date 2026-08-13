@@ -11,14 +11,17 @@ import com.docstructure.platform.rules.RuleSetService;
 import com.docstructure.platform.search.EmbeddingProvider;
 import com.docstructure.platform.search.ExtractedData;
 import com.docstructure.platform.search.ExtractedDataRepository;
+import com.docstructure.platform.search.ExtractedDataStatus;
 import com.docstructure.platform.search.VectorLiterals;
 import com.docstructure.platform.tenancy.Tenant;
 import com.docstructure.platform.tenancy.TenantRepository;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.persistence.EntityManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,9 +33,12 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * v1 runs extraction synchronously inline (PENDING is never actually observed by a client —
- * see docs/DECISIONS.md); the schema/status model already supports a real async worker
- * picking up PENDING runs later without any API changes.
+ * Split in two: {@link #enqueueExtraction} does only the fast, synchronous part (validation,
+ * strategy resolution, creating a PENDING run) and returns immediately; the actual extraction
+ * work — {@link #performExtraction} — runs later, off the request thread, picked up by
+ * ExtractionWorker once the enqueueing transaction commits. This is exactly the split the
+ * original synchronous v1 design anticipated: PENDING/RUNNING were always part of the status
+ * model, just never actually observed by a client until now — see docs/DECISIONS.md.
  */
 @Service
 public class ExtractionService {
@@ -50,13 +56,17 @@ public class ExtractionService {
     private final DocumentEventService documentEventService;
     private final EmbeddingProvider embeddingProvider;
     private final EntityManager entityManager;
+    private final ApplicationEventPublisher eventPublisher;
+    private final MeterRegistry meterRegistry;
+    private final ExtractionFailureRecorder failureRecorder;
 
     public ExtractionService(DocumentRepository documentRepository, TenantRepository tenantRepository,
                               ExtractionRunRepository runRepository, ExtractedDataRepository extractedDataRepository,
                               ExtractionStrategyFactory strategyFactory, RuleSetService ruleSetService,
                               ObjectMapper objectMapper, AuditService auditService,
                               DocumentEventService documentEventService, EmbeddingProvider embeddingProvider,
-                              EntityManager entityManager) {
+                              EntityManager entityManager, ApplicationEventPublisher eventPublisher,
+                              MeterRegistry meterRegistry, ExtractionFailureRecorder failureRecorder) {
         this.documentRepository = documentRepository;
         this.tenantRepository = tenantRepository;
         this.runRepository = runRepository;
@@ -68,11 +78,22 @@ public class ExtractionService {
         this.documentEventService = documentEventService;
         this.embeddingProvider = embeddingProvider;
         this.entityManager = entityManager;
+        this.eventPublisher = eventPublisher;
+        this.failureRecorder = failureRecorder;
+        this.meterRegistry = meterRegistry;
     }
 
+    /**
+     * Fast path, runs synchronously in the caller's request: validates the document/tenant,
+     * resolves the extraction strategy (misconfiguration — e.g. tenant set to LLM while
+     * platform.extraction.llm.enabled=false — fails loudly here, before any run row exists or
+     * background work is scheduled, since that's a deployment issue the caller should see
+     * immediately), creates the PENDING run, and publishes ExtractionRequestedEvent for
+     * ExtractionWorker to pick up once this transaction commits.
+     */
     @TenantScoped
     @Transactional
-    public ExtractionRunResponse triggerExtraction(UUID tenantId, UUID documentId) {
+    public ExtractionRunResponse enqueueExtraction(UUID tenantId, UUID documentId, UUID triggeredByUserId) {
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Document not found"));
         if (document.getRawText() == null || document.getRawText().isBlank()) {
@@ -81,9 +102,6 @@ public class ExtractionService {
         Tenant tenant = tenantRepository.findById(tenantId)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Tenant not found"));
 
-        // Misconfiguration (e.g. tenant set to LLM while platform.extraction.llm.enabled=false)
-        // fails loudly here, before an ExtractionRun row even exists — that's a deployment
-        // issue, not a per-document outcome to record and move on from.
         ExtractionStrategy strategy = strategyFactory.resolve(tenant.getSettings());
         ExtractionStrategyType strategyType = strategy instanceof LlmExtractionStrategy
                 ? ExtractionStrategyType.LLM : ExtractionStrategyType.RULE_BASED;
@@ -92,21 +110,63 @@ public class ExtractionService {
         run.setTenantId(tenantId);
         run.setDocumentId(documentId);
         run.setStrategy(strategyType);
-        run.setStartedAt(Instant.now());
+        run.setStatus(ExtractionRunStatus.PENDING);
+        run = runRepository.save(run);
 
+        log.info("extraction enqueued run={} document={} tenant={} strategy={} triggeredBy={}",
+                run.getId(), documentId, tenantId, strategyType, triggeredByUserId);
+        documentEventService.publishExtractionStatus(tenantId, documentId, ExtractionRunStatus.PENDING);
+        eventPublisher.publishEvent(new ExtractionRequestedEvent(tenantId, documentId, run.getId(), triggeredByUserId));
+        return ExtractionRunResponse.from(run);
+    }
+
+    /**
+     * The actual work, formerly the whole of the old synchronous triggerExtraction — now only
+     * ever called by ExtractionWorker, on a background thread, against a run row that
+     * enqueueExtraction already created and committed. Never throws: every failure mode is
+     * caught and recorded as a FAILED run, since there's no HTTP caller left to propagate an
+     * exception to by the time this runs.
+     */
+    @TenantScoped
+    @Transactional
+    public void performExtraction(UUID tenantId, UUID documentId, UUID runId) {
+        ExtractionRun run = runRepository.findById(runId).orElse(null);
+        if (run == null) {
+            log.warn("extraction run={} not found when worker picked it up (tenant={}, document={}) — dropping",
+                    runId, tenantId, documentId);
+            return;
+        }
+        Document document = documentRepository.findById(documentId).orElse(null);
+        if (document == null) {
+            log.warn("document={} not found when running extraction run={} (tenant={})", documentId, runId, tenantId);
+            failureRecorder.recordFailure(tenantId, documentId, runId, "Document not found");
+            return;
+        }
+        Tenant tenant = tenantRepository.findById(tenantId).orElse(null);
+        if (tenant == null) {
+            log.warn("tenant={} not found when running extraction run={}", tenantId, runId);
+            failureRecorder.recordFailure(tenantId, documentId, runId, "Tenant not found");
+            return;
+        }
+
+        log.info("extraction started run={} document={} tenant={} strategy={}", runId, documentId, tenantId,
+                run.getStrategy());
+        run.setStatus(ExtractionRunStatus.RUNNING);
+        run.setStartedAt(Instant.now());
+        runRepository.save(run);
+        documentEventService.publishExtractionStatus(tenantId, documentId, ExtractionRunStatus.RUNNING);
+        Timer.Sample sample = Timer.start(meterRegistry);
+
+        ExtractionStrategy strategy = strategyFactory.resolve(tenant.getSettings());
         try {
-            if (strategyType == ExtractionStrategyType.RULE_BASED) {
-                // resolveDefinition (non-throwing), not getActive: a nested @Transactional
-                // method throwing marks the whole transaction rollback-only in Spring even
-                // though we catch it right here — see RuleSetService#findActive javadoc.
+            if (run.getStrategy() == ExtractionStrategyType.RULE_BASED) {
                 // Considers the tenant's own active rule set first, falling back to a
                 // platform-shipped default for this doc type when the tenant has none — see
-                // RuleSetService#resolveDefinition. ruleSetId stays null when only a default
-                // applies, since it references extraction_rule_sets (tenant rows only).
-                if (ruleSetService.resolveDefinition(tenantId, document.getDocType()).isEmpty()) {
-                    throw new ApiExceptions.NotFoundException(
-                            "No active rule set for doc type '" + document.getDocType() + "'");
-                }
+                // RuleSetService#resolveDefinition. ruleSetId stays null both when only a
+                // default applies (it references extraction_rule_sets, tenant rows only) and
+                // when no rule set exists at all — RuleBasedExtractionStrategy no longer treats
+                // that second case as a failure (see its own javadoc), it just returns an
+                // UNSTRUCTURED result with no fields, and this run still runs to completion.
                 run.setRuleSetId(ruleSetService.findActive(tenantId, document.getDocType())
                         .map(rs -> rs.getId())
                         .orElse(null));
@@ -115,6 +175,7 @@ public class ExtractionService {
             ExtractionContext context = new ExtractionContext(tenantId, documentId, document.getDocType(),
                     document.getRawText());
             ExtractionResult result = strategy.extract(context);
+            boolean isStructured = result.status() != ExtractedDataStatus.UNSTRUCTURED;
 
             run.setStatus(ExtractionRunStatus.SUCCEEDED);
             run.setCompletedAt(Instant.now());
@@ -131,24 +192,36 @@ public class ExtractionService {
             data = extractedDataRepository.save(data);
             writeEmbedding(data.getId(), document.getRawText());
 
-            document.setStatus(DocumentStatus.STRUCTURED);
+            // STRUCTURED specifically means "fields were extracted" — a document with no
+            // matching rule set stays at TEXT_EXTRACTED even though it now has an embedding and
+            // is findable via semantic/fuzzy search; STRUCTURED would overclaim what happened.
+            document.setStatus(isStructured ? DocumentStatus.STRUCTURED : DocumentStatus.TEXT_EXTRACTED);
             documentRepository.save(document);
             auditService.record("EXTRACTION_RUN_COMPLETED", "EXTRACTION_RUN", run.getId(),
-                    Map.of("documentId", documentId, "status", "SUCCEEDED"));
+                    Map.of("documentId", documentId, "status", "SUCCEEDED", "structured", isStructured));
             documentEventService.publishStatusChange(tenantId, documentId, document.getStatus(), document.getDocType());
-            return ExtractionRunResponse.from(run);
+            documentEventService.publishExtractionStatus(tenantId, documentId, ExtractionRunStatus.SUCCEEDED);
+            log.info("extraction succeeded run={} document={} tenant={} structured={} confidence={}", runId,
+                    documentId, tenantId, isStructured, result.overallConfidence());
+            recordExtractionMetrics(sample, run.getStrategy(), ExtractionRunStatus.SUCCEEDED);
         } catch (RuntimeException e) {
-            run.setStatus(ExtractionRunStatus.FAILED);
-            run.setCompletedAt(Instant.now());
-            run.setErrorMessage(e.getMessage());
-            runRepository.save(run);
-            document.setStatus(DocumentStatus.STRUCTURING_FAILED);
-            documentRepository.save(document);
-            auditService.record("EXTRACTION_RUN_FAILED", "EXTRACTION_RUN", run.getId(),
-                    Map.of("documentId", documentId, "status", "FAILED", "error", String.valueOf(e.getMessage())));
-            documentEventService.publishStatusChange(tenantId, documentId, document.getStatus(), document.getDocType());
-            return ExtractionRunResponse.from(run);
+            log.warn("extraction failed run={} document={} tenant={}: {}", runId, documentId, tenantId, e.toString());
+            recordExtractionMetrics(sample, run.getStrategy(), ExtractionRunStatus.FAILED);
+            // Rethrow rather than recording FAILED here: the RUNNING update above already holds
+            // a row lock in THIS (still-open) transaction, and ExtractionFailureRecorder's own
+            // REQUIRES_NEW transaction updating the very same row would block on that lock
+            // forever — a same-thread self-deadlock, confirmed live (two backends stuck on
+            // "Lock/transactionid" against the same extraction_runs row, a third stuck behind
+            // both). Rethrowing lets this transaction actually finish (roll back) first, so by
+            // the time ExtractionWorker's catch calls recordFailure, the lock is gone.
+            throw e;
         }
+    }
+
+    private void recordExtractionMetrics(Timer.Sample sample, ExtractionStrategyType strategy,
+                                          ExtractionRunStatus status) {
+        sample.stop(meterRegistry.timer("extraction.duration", "strategy", strategy.name(), "status", status.name()));
+        meterRegistry.counter("extraction.runs", "strategy", strategy.name(), "status", status.name()).increment();
     }
 
     @TenantScoped
@@ -179,7 +252,7 @@ public class ExtractionService {
         }
         Optional<float[]> vector = embeddingProvider.embed(rawText);
         if (vector.isEmpty()) {
-            log.warn("Embedding generation returned no result for extracted_data {}", extractedDataId);
+            log.warn("embedding generation returned no result for extracted_data={}", extractedDataId);
             return;
         }
         try {
@@ -190,8 +263,9 @@ public class ExtractionService {
                     .setParameter("model", embeddingProvider.modelName())
                     .setParameter("id", extractedDataId)
                     .executeUpdate();
+            log.debug("embedding written extracted_data={} model={}", extractedDataId, embeddingProvider.modelName());
         } catch (RuntimeException e) {
-            log.warn("Failed to persist embedding for extracted_data {}: {}", extractedDataId, e.toString());
+            log.warn("failed to persist embedding for extracted_data={}: {}", extractedDataId, e.toString());
         }
     }
 

@@ -6,6 +6,8 @@ import com.docstructure.platform.documents.Document;
 import com.docstructure.platform.documents.DocumentRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -27,6 +29,8 @@ import java.util.UUID;
  */
 @Service
 public class SearchService {
+
+    private static final Logger log = LoggerFactory.getLogger(SearchService.class);
 
     private final EntityManager entityManager;
     private final EmbeddingProvider embeddingProvider;
@@ -66,6 +70,8 @@ public class SearchService {
                 "page", page,
                 "size", size,
                 "resultCount", response.totalElements()));
+        log.debug("search executed tenant={} docType={} q={} semantic={} results={}", tenantId, docType, q,
+                response.semanticSearchAvailable(), response.totalElements());
         return response;
     }
 

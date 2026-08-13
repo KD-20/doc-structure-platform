@@ -5,6 +5,8 @@ import com.docstructure.platform.common.ApiExceptions;
 import com.docstructure.platform.common.TenantScoped;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,6 +21,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class RuleSetService {
+
+    private static final Logger log = LoggerFactory.getLogger(RuleSetService.class);
 
     private final ExtractionRuleSetRepository repository;
     private final DefaultRuleSetRepository defaultRuleSetRepository;
@@ -64,7 +68,10 @@ public class RuleSetService {
         ruleSet.setDefinition(objectMapper.valueToTree(definition));
         ruleSet.setActive(true);
         ruleSet.setCreatedByUserId(userId);
-        return repository.save(ruleSet);
+        ruleSet = repository.save(ruleSet);
+        log.info("rule set version created tenant={} docType={} version={} createdBy={}", tenantId, docType,
+                nextVersion, userId);
+        return ruleSet;
     }
 
     /**
@@ -91,7 +98,9 @@ public class RuleSetService {
                     repository.saveAndFlush(current);
                 });
         target.setActive(true);
-        return repository.save(target);
+        ExtractionRuleSet activated = repository.save(target);
+        log.info("rule set version activated tenant={} docType={} version={}", tenantId, docType, version);
+        return activated;
     }
 
     @TenantScoped
@@ -156,31 +165,6 @@ public class RuleSetService {
             return Optional.of(parseDefinition(custom.get()));
         }
         return defaultRuleSetRepository.findByDocType(docType).map(this::parseDefaultDefinition);
-    }
-
-    /**
-     * Every definition worth scoring a document's text against for auto-classification: the
-     * tenant's own active rule sets, plus any shipped default whose doc type the tenant hasn't
-     * already overridden. An overridden default is skipped rather than scored alongside its
-     * replacement — only one of the two should count per doc type.
-     */
-    @TenantScoped
-    @Transactional(readOnly = true)
-    public List<RuleSetDefinition> listCandidateDefinitionsForClassification(UUID tenantId) {
-        List<ExtractionRuleSet> tenantActive = repository.findByTenantIdAndActiveTrue(tenantId);
-        var overriddenDocTypes = tenantActive.stream().map(ExtractionRuleSet::getDocType)
-                .collect(Collectors.toSet());
-
-        List<RuleSetDefinition> candidates = new ArrayList<>();
-        for (ExtractionRuleSet ruleSet : tenantActive) {
-            candidates.add(parseDefinition(ruleSet));
-        }
-        for (DefaultRuleSet defaultRuleSet : defaultRuleSetRepository.findAllByOrderByDocTypeAsc()) {
-            if (!overriddenDocTypes.contains(defaultRuleSet.getDocType())) {
-                candidates.add(parseDefaultDefinition(defaultRuleSet));
-            }
-        }
-        return candidates;
     }
 
     /**

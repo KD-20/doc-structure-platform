@@ -10,6 +10,8 @@ import com.docstructure.platform.audit.Audited;
 import com.docstructure.platform.common.ApiExceptions;
 import com.docstructure.platform.common.TenantScoped;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,6 +22,8 @@ import java.util.UUID;
 
 @Service
 public class TenantService {
+
+    private static final Logger log = LoggerFactory.getLogger(TenantService.class);
 
     private final TenantRepository tenantRepository;
     private final TenantMembershipRepository membershipRepository;
@@ -47,7 +51,9 @@ public class TenantService {
         Tenant tenant = new Tenant();
         tenant.setName(name);
         tenant.setSlug(slug);
-        return tenantRepository.save(tenant);
+        tenant = tenantRepository.save(tenant);
+        log.info("tenant created id={} slug={}", tenant.getId(), slug);
+        return tenant;
     }
 
     @TenantScoped
@@ -61,6 +67,7 @@ public class TenantService {
         membership.setUserId(userId);
         membership.setRole(role);
         membershipRepository.save(membership);
+        log.info("membership added tenant={} user={} role={}", tenantId, userId, role);
     }
 
     @Transactional(readOnly = true)
@@ -89,7 +96,9 @@ public class TenantService {
         Tenant tenant = tenantRepository.findById(tenantId)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Tenant not found"));
         tenant.setSettings(settings);
-        return TenantResponse.from(tenantRepository.save(tenant));
+        TenantResponse response = TenantResponse.from(tenantRepository.save(tenant));
+        log.info("tenant settings updated id={}", tenantId);
+        return response;
     }
 
     @TenantScoped
@@ -121,6 +130,7 @@ public class TenantService {
         membership.setUserId(user.getId());
         membership.setRole(role);
         membershipRepository.save(membership);
+        log.info("member added tenant={} user={} role={}", tenantId, user.getId(), role);
         return new MemberResponse(user.getId(), user.getEmail(), user.getFullName(), role);
     }
 
@@ -132,10 +142,13 @@ public class TenantService {
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Membership not found"));
         if (membership.getRole() == MembershipRole.OWNER && newRole != MembershipRole.OWNER
                 && countOwners(tenantId) <= 1) {
+            log.warn("rejected demoting last owner tenant={} user={}", tenantId, userId);
             throw new ApiExceptions.ValidationException("Cannot demote the last remaining owner");
         }
+        MembershipRole previousRole = membership.getRole();
         membership.setRole(newRole);
         membershipRepository.save(membership);
+        log.info("member role changed tenant={} user={} from={} to={}", tenantId, userId, previousRole, newRole);
     }
 
     @TenantScoped
@@ -144,9 +157,11 @@ public class TenantService {
         TenantMembership membership = membershipRepository.findByTenantIdAndUserId(tenantId, userId)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("Membership not found"));
         if (membership.getRole() == MembershipRole.OWNER && countOwners(tenantId) <= 1) {
+            log.warn("rejected removing last owner tenant={} user={}", tenantId, userId);
             throw new ApiExceptions.ValidationException("Cannot remove the last remaining owner");
         }
         membershipRepository.delete(membership);
+        log.info("member removed tenant={} user={}", tenantId, userId);
     }
 
     private long countOwners(UUID tenantId) {

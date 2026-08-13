@@ -4,6 +4,8 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -23,6 +25,8 @@ import java.util.UUID;
  */
 @Service
 public class JwtService {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtService.class);
 
     private final SecretKey key;
     private final long accessTokenMinutes;
@@ -53,6 +57,9 @@ public class JwtService {
         try {
             return Optional.of(Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload());
         } catch (JwtException | IllegalArgumentException e) {
+            // Never log the token itself — just that one was rejected and why (expired,
+            // bad signature, malformed, ...), which is enough to spot abuse/clock-skew patterns.
+            log.debug("rejected JWT: {}", e.toString());
             return Optional.empty();
         }
     }

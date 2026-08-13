@@ -37,4 +37,10 @@ public record RuleParams(Map<String, Object> raw) {
         }
         return (List<String>) list;
     }
+
+    @SuppressWarnings("unchecked")
+    public List<String> getStringList(String key, List<String> defaultValue) {
+        Object v = raw.get(key);
+        return v instanceof List<?> list ? (List<String>) list : defaultValue;
+    }
 }

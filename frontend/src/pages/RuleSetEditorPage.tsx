@@ -102,6 +102,8 @@ export function RuleSetEditorPage() {
   const [previewResult, setPreviewResult] = useState<InterpretedField[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [reextracting, setReextracting] = useState(false);
+  const [reextractMessage, setReextractMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (isNew) return;
@@ -229,6 +231,31 @@ export function RuleSetEditorPage() {
       setActive(true);
     } catch (err) {
       setError(errorMessage(err));
+    }
+  }
+
+  // Saving/activating already re-syncs existing documents automatically (server-side, see
+  // RuleSetController). This is the manual counterpart — re-run against what's already uploaded
+  // without changing the rule set itself, e.g. after fixing something unrelated.
+  async function handleReextract() {
+    if (isNew) return;
+    setError(null);
+    setReextractMessage(null);
+    setReextracting(true);
+    try {
+      const { data } = await apiClient.post<{ documentsEnqueued: number; documentsSkipped: number }>(
+        `/tenants/${tenantId}/rule-sets/${docType}/reextract`,
+      );
+      const { documentsEnqueued, documentsSkipped } = data;
+      setReextractMessage(
+        `Re-running extraction on ${documentsEnqueued} document${documentsEnqueued === 1 ? "" : "s"}` +
+          (documentsSkipped > 0 ? ` (${documentsSkipped} skipped — no text extracted yet)` : "") +
+          ". Check the Documents page for progress.",
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setReextracting(false);
     }
   }
 
@@ -421,8 +448,21 @@ export function RuleSetEditorPage() {
             <button className="secondary" onClick={handleActivate} disabled={!canEdit}>
               Activate this version
             </button>
+          )}{" "}
+          {!isNew && canPreview && (
+            <button className="secondary" onClick={handleReextract} disabled={reextracting}>
+              {reextracting ? "Re-running..." : "Re-run on existing documents"}
+            </button>
           )}
         </div>
+        {!isNew && (
+          <p className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+            Saving or activating a version already re-runs extraction on every existing document
+            of this type automatically — use the button above only to re-sync without changing
+            anything.
+          </p>
+        )}
+        {reextractMessage && <p style={{ marginTop: 8 }}>{reextractMessage}</p>}
       </div>
 
       {canPreview && <div className="card">

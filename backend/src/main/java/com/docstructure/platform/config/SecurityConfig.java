@@ -2,6 +2,7 @@ package com.docstructure.platform.config;
 
 import com.docstructure.platform.auth.JwtAuthFilter;
 import com.docstructure.platform.auth.JwtService;
+import com.docstructure.platform.common.RequestLoggingFilter;
 import com.docstructure.platform.guestaccess.GuestAuthFilter;
 import com.docstructure.platform.guestaccess.GuestLinkService;
 import org.springframework.context.annotation.Bean;
@@ -40,8 +41,14 @@ public class SecurityConfig {
     }
 
     @Bean
+    public RequestLoggingFilter requestLoggingFilter() {
+        return new RequestLoggingFilter();
+    }
+
+    @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthFilter jwtAuthFilter,
-                                                     GuestAuthFilter guestAuthFilter) throws Exception {
+                                                     GuestAuthFilter guestAuthFilter,
+                                                     RequestLoggingFilter requestLoggingFilter) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -62,7 +69,12 @@ public class SecurityConfig {
                 // Registered after jwtAuthFilter (this call comes second) so JWT auth gets
                 // first chance at the request; GuestAuthFilter itself also no-ops if JWT
                 // already authenticated it. See GuestAuthFilter's class javadoc.
-                .addFilterBefore(guestAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(guestAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                // Outermost of the three: runs before jwtAuthFilter so requestId is in MDC
+                // before authentication happens, and its finally block is therefore the last
+                // to run, so its single MDC.clear() cleans up everything the auth filters add
+                // downstream too. See RequestLoggingFilter's own javadoc.
+                .addFilterBefore(requestLoggingFilter, JwtAuthFilter.class);
         return http.build();
     }
 }

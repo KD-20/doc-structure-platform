@@ -1,28 +1,20 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { apiClient, errorMessage } from "../api/client";
-import type { DocumentStatus, SearchFilter, SearchResponse, SearchResultItem } from "../api/types";
+import type { SearchFilter, SearchResponse, SearchResultItem } from "../api/types";
 import { StatusPill } from "../components/StatusPill";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { FieldSelect } from "../components/FieldSelect";
 import { DownloadIcon } from "../components/icons";
 
-// Best outcome first, worst last — a document that made it all the way through the
-// pipeline (STRUCTURED) is a more useful result than one that failed at either stage.
-const STATUS_ORDER: DocumentStatus[] = [
-  "STRUCTURED",
-  "TEXT_EXTRACTED",
-  "UPLOADED",
-  "STRUCTURING_FAILED",
-  "TEXT_EXTRACTION_FAILED",
-];
-
-function groupByStatus(items: SearchResultItem[]): { status: DocumentStatus; items: SearchResultItem[] }[] {
-  const byStatus = new Map<DocumentStatus, SearchResultItem[]>();
-  for (const item of items) {
-    byStatus.set(item.status, [...(byStatus.get(item.status) ?? []), item]);
-  }
-  return STATUS_ORDER.filter((s) => byStatus.has(s)).map((status) => ({ status, items: byStatus.get(status)! }));
+// The API already returns items ordered by match score descending (full-text rank, fuzzy/semantic
+// similarity, or a 50/50 blend of both when both are given — see SearchService#searchImpl's
+// rankExpr) — items.map below renders that order as-is rather than re-bucketing by status, which
+// used to hide it (a lower-scored STRUCTURED result could out-rank a closer semantic match).
+// matchPercent turns the raw score into something a user can actually see and trust the ordering
+// against, capped at 100% since a blended score can exceed 1.0 in edge cases.
+function matchPercent(textRank: number): number {
+  return Math.min(100, Math.round(textRank * 100));
 }
 
 export function SearchPage() {
@@ -45,7 +37,10 @@ export function SearchPage() {
   }, [tenantId]);
 
   function addFilter() {
-    setFilters([...filters, { field: "", op: "eq", value: "" }]);
+    // "contains" default, not "eq": most extracted fields hold free text (an address block, a
+    // degree line, a work-history block), where an exact whole-value match almost never applies
+    // — "eq" is for the minority case (an ID, an amount) and stays available in the dropdown.
+    setFilters([...filters, { field: "", op: "contains", value: "" }]);
   }
 
   function updateFilter(i: number, patch: Partial<SearchFilter>) {
@@ -129,7 +124,7 @@ export function SearchPage() {
         </div>
 
         <label style={{ fontSize: 13, color: "var(--muted)", display: "block", marginBottom: 10 }}>
-          Structured filters
+          Structured filters (pick "Any field" if you don't know which field holds the value)
         </label>
         {filters.map((f, i) => (
           <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -140,8 +135,9 @@ export function SearchPage() {
               onChange={(value) => updateFilter(i, { field: value })}
             />
             <select value={f.op} onChange={(e) => updateFilter(i, { op: e.target.value as SearchFilter["op"] })}>
-              <option value="eq">equals</option>
+              <option value="eq">equals (exact)</option>
               <option value="contains">contains</option>
+              <option value="fuzzy">fuzzy (close match, typos/case ok)</option>
               <option value="gt">greater than</option>
               <option value="gte">greater than or equal</option>
               <option value="lt">less than</option>
@@ -162,7 +158,11 @@ export function SearchPage() {
         </button>
 
         <div className="form-row" style={{ marginTop: 16 }}>
-          <label>Semantic query (v1 seam — not active until an embedding provider is configured)</label>
+          <label>
+            Fuzzy / semantic query (finds conceptually similar documents, not just keyword
+            matches — only returns results above ~70% similarity; requires an embedding provider
+            to be configured)
+          </label>
           <input value={semanticQuery} onChange={(e) => setSemanticQuery(e.target.value)} placeholder="optional" />
         </div>
 
@@ -183,43 +183,38 @@ export function SearchPage() {
               </>
             )}
           </p>
-          {groupByStatus(result.items).map((group) => (
-            <div key={group.status} style={{ marginBottom: 16 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <StatusPill status={group.status} />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {group.items.length}
-                </span>
-              </div>
-              <div className="item-bar-list">
-                {group.items.map((item) => (
-                  <div className="item-bar static" key={item.documentId}>
-                    <DocumentPreview
-                      tenantId={tenantId!}
-                      documentId={item.documentId}
-                      contentType={item.contentType}
-                      filename={item.filename}
-                      size="row"
-                    >
-                      <div className="item-bar-main">
-                        <span className="item-bar-title">{item.filename}</span>
-                        <div className="item-bar-meta">{item.docType}</div>
-                      </div>
-                    </DocumentPreview>
-                    <div className="item-bar-right">
-                      <button
-                        className="icon-btn secondary"
-                        title="Download original"
-                        onClick={() => handleDownload(item)}
-                      >
-                        <DownloadIcon />
-                      </button>
+          <div className="item-bar-list">
+            {result.items.map((item) => (
+              <div className="item-bar static" key={item.documentId}>
+                <DocumentPreview
+                  tenantId={tenantId!}
+                  documentId={item.documentId}
+                  contentType={item.contentType}
+                  filename={item.filename}
+                  size="row"
+                >
+                  <div className="item-bar-main">
+                    <span className="item-bar-title">{item.filename}</span>
+                    <div className="item-bar-meta">
+                      {item.docType} · <StatusPill status={item.status} />
                     </div>
                   </div>
-                ))}
+                </DocumentPreview>
+                <div className="item-bar-right" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="muted" style={{ fontSize: 12 }} title="Match score against your query">
+                    {matchPercent(item.textRank)}% match
+                  </span>
+                  <button
+                    className="icon-btn secondary"
+                    title="Download original"
+                    onClick={() => handleDownload(item)}
+                  >
+                    <DownloadIcon />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
     </div>

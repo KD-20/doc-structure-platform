@@ -1,9 +1,9 @@
-import type { DocumentStatus } from "../api/types";
+import type { DocumentStatus, ExtractionRunStatus } from "../api/types";
 
-// Only errorMessage is actually read below — a minimal structural shape (rather than the full
-// ExtractionRun) so both the authenticated ExtractionRun and the anonymous-trial
-// PublicExtractionRun satisfy it without an adapter.
+// A minimal structural shape (rather than the full ExtractionRun) so both the authenticated
+// ExtractionRun and the anonymous-trial PublicExtractionRun satisfy it without an adapter.
 interface MinimalRun {
+  status: ExtractionRunStatus;
   errorMessage: string | null;
 }
 
@@ -20,7 +20,7 @@ const SYMBOL: Record<StepState, string> = {
   done: "✓",
   failed: "✗",
   pending: "○",
-  skipped: "–",
+  skipped: "⏭",
 };
 
 interface Step {
@@ -30,17 +30,19 @@ interface Step {
 }
 
 /**
- * Processing here is synchronous (see docs/DECISIONS.md) — text extraction and structuring
- * both run inline within the upload/trigger request, not as a background job. So there's no
- * "time remaining" to show: by the time a document's status is visible at all, whatever's
- * going to happen to it already has. This shows *what* happened/is pending instead of
- * fabricating a progress percentage for a queue that doesn't exist.
+ * Text extraction still runs inline within the upload request, but structured extraction is
+ * async (see ExtractionService#enqueueExtraction) — a document can sit at TEXT_EXTRACTED for a
+ * little while with a run genuinely PENDING/RUNNING in the background. Document status alone
+ * can't distinguish "not yet run" from "running right now" (DocumentStatus doesn't have an
+ * in-progress value), so this leans on latestRun's own status for that distinction whenever the
+ * document hasn't reached a terminal STRUCTURED/STRUCTURING_FAILED state yet.
  */
 function buildSteps(status: DocumentStatus, latestRun?: MinimalRun): Step[] {
   const textState: StepState = status === "TEXT_EXTRACTION_FAILED" ? "failed" : "done";
 
   let structureState: StepState;
   let structureNote: string | undefined;
+  let unstructuredStep: Step | undefined;
   if (status === "STRUCTURED") {
     structureState = "done";
   } else if (status === "STRUCTURING_FAILED") {
@@ -49,12 +51,28 @@ function buildSteps(status: DocumentStatus, latestRun?: MinimalRun): Step[] {
   } else if (status === "TEXT_EXTRACTION_FAILED") {
     structureState = "skipped";
     structureNote = "No text to structure";
+  } else if (latestRun?.status === "RUNNING") {
+    structureState = "pending";
+    structureNote = "Running now…";
+  } else if (latestRun?.status === "PENDING") {
+    structureState = "pending";
+    structureNote = "Queued…";
+  } else if (latestRun?.status === "SUCCEEDED") {
+    // A run genuinely completed, but document status stayed TEXT_EXTRACTED (not STRUCTURED) —
+    // that combination only happens for RuleBasedExtractionStrategy's UNSTRUCTURED fallback (no
+    // matching rule set, see its own javadoc). It already ran automatically; "Not yet run" here
+    // would wrongly suggest a manual retrigger is still needed. Surfaced as its own completed
+    // step (ticked) rather than folded into the skipped "Structured" note, so the journey reads
+    // as "skipped structuring, but still finished successfully" instead of just stopping short.
+    structureState = "skipped";
+    structureNote = "No matching rule set — nothing to structure";
+    unstructuredStep = { label: "Unstructured", state: "done", note: "Indexed for search" };
   } else {
     structureState = "pending";
     structureNote = "Not yet run";
   }
 
-  return [
+  const steps: Step[] = [
     { label: "Uploaded", state: "done" },
     {
       label: "Text extracted",
@@ -63,6 +81,8 @@ function buildSteps(status: DocumentStatus, latestRun?: MinimalRun): Step[] {
     },
     { label: "Structured", state: structureState, note: structureNote },
   ];
+  if (unstructuredStep) steps.push(unstructuredStep);
+  return steps;
 }
 
 export function PipelineSteps({ status, latestRun }: { status: DocumentStatus; latestRun?: MinimalRun }) {

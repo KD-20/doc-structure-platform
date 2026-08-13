@@ -12,6 +12,14 @@ package com.docstructure.platform.search;
  * Verified in psql before wiring in — see chat history for the manual test. Shared between the
  * WHERE predicate (SearchQueryBuilder) and the rank expression (SearchService) so both agree on
  * what "matches :q" means.
+ *
+ * Only lexemes of 3+ characters get the :* prefix marker (\w{3,} in the regex below) — a bare
+ * digit or two-letter lexeme left as a prefix wildcard matches far too broadly (e.g. a query
+ * containing the standalone digit "9" turned into '9':*, which matched any number token
+ * starting with 9 — an Aadhaar VID beginning "9170..." in a completely unrelated document's OCR
+ * text — confirmed live in psql). Lexemes under 3 characters stay as an exact-match term
+ * instead, consistent with the length(term) >= 3 / >= 7 guards TRIGRAM_MATCH and SUBSTRING_MATCH
+ * already use below.
  */
 final class TsQueryExpr {
 
@@ -20,7 +28,7 @@ final class TsQueryExpr {
 
     static final String PREFIX_OR_MATCH =
             "(regexp_replace(replace(plainto_tsquery('english', :q)::text, ' & ', ' | '), "
-                    + "'''(\\w+)''', '''\\1'':*', 'g'))::tsquery";
+                    + "'''(\\w{3,})''', '''\\1'':*', 'g'))::tsquery";
 
     // pg_trgm word_similarity: is :q an approximate match for some extent of raw_text? Catches
     // typos ("markettting" ~ "marketing", "invocie" ~ "invoice") that stemming/prefix matching

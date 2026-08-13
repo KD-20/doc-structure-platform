@@ -28,6 +28,22 @@ class SearchQueryBuilder {
             Map.of("gt", ">", "gte", ">=", "lt", "<", "lte", "<=");
     private static final String NUMERIC_PATTERN = "^-?[0-9]+(\\.[0-9]+)?$";
 
+    // Sentinel field name meaning "don't require the caller to know which field the value lives
+    // in — match if ANY extracted field on the document satisfies this operator/value." Iterates
+    // every key in the fields JSONB via jsonb_each rather than a fixed field path; NULL-safe on
+    // documents with no extracted_data at all (jsonb_each(NULL::jsonb) returns zero rows rather
+    // than erroring — verified in psql), same as the named-field path already tolerates.
+    static final String ANY_FIELD = "*";
+
+    // "Fuzzy search": a semantic query is only considered an actual match above this cosine
+    // similarity — pgvector's <=> operator is cosine *distance* (0 = identical, 2 = opposite),
+    // so similarity is (1 - distance) and this is a floor on that, not the distance itself.
+    // Below this, two documents just aren't meaningfully related; ranking them anyway (the old
+    // behavior) let a semantic query silently degrade into "return everything, weakly sorted"
+    // instead of "return what's actually similar." Not currently exposed as a request param —
+    // one fixed threshold for every semantic query, matching what was asked for.
+    static final double SEMANTIC_SIMILARITY_THRESHOLD = 0.70;
+
     record BuiltPredicate(String sql, Map<String, Object> params) {
     }
 
@@ -35,9 +51,11 @@ class SearchQueryBuilder {
      * restrictToDocumentIds is how guest search stays inside a guest link's scope — see
      * GuestAccessController. queryEmbeddingLiteral (a pgvector literal string, e.g.
      * "[0.1,0.2,...]") is non-null only when semantic search is actually available for this
-     * query — it both binds the :queryEmbedding param (for ranking, see SearchService) and
-     * excludes documents with no embedding yet from the candidate set, so they can't sort
-     * ahead of real matches under a DESC rank ordering.
+     * query — it both binds the :queryEmbedding param (for ranking, see SearchService) and,
+     * combined with the SEMANTIC_SIMILARITY_THRESHOLD filter below, restricts the candidate set
+     * to documents that both have an embedding AND are genuinely similar to the query — not
+     * just "have any embedding at all," which would let a barely-related document sneak in at
+     * the bottom of a DESC rank ordering.
      */
     BuiltPredicate build(UUID tenantId, String docType, String q, List<SearchFilter> filters,
                           List<UUID> restrictToDocumentIds, String queryEmbeddingLiteral) {
@@ -72,13 +90,39 @@ class SearchQueryBuilder {
         if (filters != null) {
             int i = 0;
             for (SearchFilter f : filters) {
+                boolean anyField = ANY_FIELD.equals(f.field());
                 String fieldParam = "field" + i;
                 String valueParam = "value" + i;
                 String rangeSqlOp = f.op() != null ? RANGE_OPERATORS.get(f.op().toLowerCase()) : null;
                 if ("contains".equalsIgnoreCase(f.op())) {
-                    where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' ILIKE :").append(valueParam);
-                    params.put(fieldParam, f.field());
+                    if (anyField) {
+                        where.append(" AND EXISTS (SELECT 1 FROM jsonb_each(ed.fields) AS kv(k, v) WHERE v->>'value' ILIKE :")
+                                .append(valueParam).append(")");
+                    } else {
+                        where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' ILIKE :").append(valueParam);
+                        params.put(fieldParam, f.field());
+                    }
                     params.put(valueParam, "%" + f.value() + "%");
+                } else if ("fuzzy".equalsIgnoreCase(f.op())) {
+                    // Same trigram machinery as full-text's TRIGRAM_MATCH (see TsQueryExpr),
+                    // applied to one field's value instead of raw_text: word_similarity finds the
+                    // best-matching extent of the field value against the typed term, so this
+                    // tolerates case, typos, AND the field value being a much longer blob than
+                    // just the word being searched for ("kurukshetra" against a multi-line
+                    // address field) — none of which "equals" (exact, whole-value) or "contains"
+                    // (exact substring) can do. word_similarity is case-insensitive here already
+                    // (verified in psql), so no lower() needed on either side.
+                    if (anyField) {
+                        where.append(" AND EXISTS (SELECT 1 FROM jsonb_each(ed.fields) AS kv(k, v) WHERE word_similarity(:")
+                                .append(valueParam).append(", coalesce(v->>'value', '')) > ")
+                                .append(TsQueryExpr.TRIGRAM_THRESHOLD).append(")");
+                    } else {
+                        where.append(" AND word_similarity(:").append(valueParam)
+                                .append(", coalesce(ed.fields->:").append(fieldParam).append("->>'value', '')) > ")
+                                .append(TsQueryExpr.TRIGRAM_THRESHOLD);
+                        params.put(fieldParam, f.field());
+                    }
+                    params.put(valueParam, f.value());
                 } else if (rangeSqlOp != null) {
                     BigDecimal numericValue;
                     try {
@@ -87,23 +131,36 @@ class SearchQueryBuilder {
                         throw new ApiExceptions.ValidationException(
                                 "Filter value for '" + f.field() + "' must be a number to use operator '" + f.op() + "'");
                     }
-                    where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' ~ '")
-                            .append(NUMERIC_PATTERN).append("'")
-                            .append(" AND (ed.fields->:").append(fieldParam).append("->>'value')::numeric ")
-                            .append(rangeSqlOp).append(" :").append(valueParam);
-                    params.put(fieldParam, f.field());
+                    if (anyField) {
+                        where.append(" AND EXISTS (SELECT 1 FROM jsonb_each(ed.fields) AS kv(k, v) WHERE v->>'value' ~ '")
+                                .append(NUMERIC_PATTERN).append("' AND (v->>'value')::numeric ")
+                                .append(rangeSqlOp).append(" :").append(valueParam).append(")");
+                    } else {
+                        where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' ~ '")
+                                .append(NUMERIC_PATTERN).append("'")
+                                .append(" AND (ed.fields->:").append(fieldParam).append("->>'value')::numeric ")
+                                .append(rangeSqlOp).append(" :").append(valueParam);
+                        params.put(fieldParam, f.field());
+                    }
                     params.put(valueParam, numericValue);
                 } else {
-                    where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' = :").append(valueParam);
-                    params.put(fieldParam, f.field());
+                    if (anyField) {
+                        where.append(" AND EXISTS (SELECT 1 FROM jsonb_each(ed.fields) AS kv(k, v) WHERE v->>'value' = :")
+                                .append(valueParam).append(")");
+                    } else {
+                        where.append(" AND ed.fields->:").append(fieldParam).append("->>'value' = :").append(valueParam);
+                        params.put(fieldParam, f.field());
+                    }
                     params.put(valueParam, f.value());
                 }
                 i++;
             }
         }
         if (queryEmbeddingLiteral != null) {
-            where.append(" AND ed.embedding IS NOT NULL");
+            where.append(" AND ed.embedding IS NOT NULL")
+                    .append(" AND (1 - (ed.embedding <=> CAST(:queryEmbedding AS vector))) > :minSimilarity");
             params.put("queryEmbedding", queryEmbeddingLiteral);
+            params.put("minSimilarity", SEMANTIC_SIMILARITY_THRESHOLD);
         }
         return new BuiltPredicate(where.toString(), params);
     }

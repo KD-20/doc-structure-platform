@@ -183,6 +183,70 @@ public abstract class ApiTestBase {
     }
 
     /**
+     * Extraction runs asynchronously now (see ExtractionService#enqueueExtraction/
+     * ExtractionWorker) — POST .../extraction-runs returns 202 with a PENDING body immediately,
+     * not a finished result. Tests that need the outcome poll this instead of asserting on the
+     * POST response directly. Also matters for cleanup correctness: a test that returns without
+     * waiting risks @AfterEach's cleanUp() deleting the run/document out from under a
+     * still-in-flight background task (observed live as a StaleObjectStateException logged by
+     * ExtractionWorker) — always wait for terminal status before a test method returns if it
+     * triggered extraction at all, even if the test doesn't care about the outcome.
+     */
+    @SuppressWarnings("unchecked")
+    protected Map<String, Object> waitForTerminalRunStatus(UUID tenantId, String token, UUID runId) {
+        String url = baseUrl() + "/api/tenants/" + tenantId + "/extraction-runs/" + runId;
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            ResponseEntity<Map> res = rest.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeaders(token)), Map.class);
+            assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
+            Map<String, Object> body = res.getBody();
+            String status = (String) body.get("status");
+            if ("SUCCEEDED".equals(status) || "FAILED".equals(status)) {
+                return body;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+        throw new AssertionError("Extraction run " + runId + " did not reach a terminal status within 5s");
+    }
+
+    /**
+     * For callers that trigger extraction indirectly (upload's auto-trigger, updateDocType's
+     * re-trigger) and never see a run id directly — finds the most recent run for the document
+     * (list is ordered newest-first) and waits for it. A brief settle delay first, since the
+     * enqueueing request may return before ExtractionWorker's AFTER_COMMIT listener has even
+     * created... no, PENDING is created synchronously in the same request — but polling
+     * immediately could still catch the list before that PENDING row's own transaction commits
+     * in a pathological case, so this retries the "list is empty" case too, not just PENDING/RUNNING.
+     */
+    @SuppressWarnings("unchecked")
+    protected void waitForLatestRunToFinish(UUID tenantId, String token, UUID documentId) {
+        String url = baseUrl() + "/api/tenants/" + tenantId + "/documents/" + documentId + "/extraction-runs";
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            ResponseEntity<List> res = rest.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeaders(token)), List.class);
+            assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
+            List<Map<String, Object>> runs = res.getBody();
+            if (runs != null && !runs.isEmpty()) {
+                UUID latestRunId = UUID.fromString((String) runs.get(0).get("id"));
+                waitForTerminalRunStatus(tenantId, token, latestRunId);
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+        throw new AssertionError("No extraction run appeared for document " + documentId + " within 5s");
+    }
+
+    /**
      * Sets TenantContext, calls into the (genuinely separate, Spring-proxied) CleanupService
      * bean, then clears it — the same pattern AuthController#selectTenant and
      * TenantController#create use. Required because TenantContextAspect reads

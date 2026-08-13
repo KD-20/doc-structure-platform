@@ -57,7 +57,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # prometheus is unauthenticated here (see SecurityConfig — anything outside /api/** is
+        # permitAll, same as health already was), matching this endpoint's local/self-hosted
+        # scope; a real public deployment should put this behind auth or a separate
+        # internal-only management port before going live — see docs/DECISIONS.md.
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: never
@@ -71,6 +75,21 @@ management:
     # SmtpEmailService itself is registered/usable.
     mail:
       enabled: false
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        extraction.duration: true
+        document.upload.duration: true
+
+logging:
+  level:
+    root: INFO
+    com.docstructure.platform: ${PLATFORM_LOG_LEVEL:INFO}
+    # Noisy at INFO/DEBUG and rarely useful here; kept at WARN regardless of the app's own level.
+    org.hibernate.SQL: WARN
+    org.springframework.web: WARN
 
 springdoc:
   swagger-ui:

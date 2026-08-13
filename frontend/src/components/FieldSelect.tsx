@@ -4,6 +4,10 @@ import type { Page } from "../api/types";
 
 const PAGE_SIZE = 5;
 
+// Sentinel meaning "match if ANY extracted field satisfies the operator/value" — see
+// SearchQueryBuilder.ANY_FIELD on the backend, which this string must match exactly.
+export const ANY_FIELD = "*";
+
 interface Props {
   tenantId: string;
   docType: string;
@@ -70,9 +74,24 @@ export function FieldSelect({ tenantId, docType, value, onChange }: Props) {
 
   return (
     <div className="field-select" ref={containerRef}>
-      <input placeholder="field" value={value} onChange={(e) => onChange(e.target.value)} onFocus={handleFocus} />
+      <input
+        placeholder="field"
+        value={value === ANY_FIELD ? "Any field" : value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={handleFocus}
+      />
       {open && (
         <div className="field-select-panel">
+          <div
+            className="field-select-item"
+            style={{ fontStyle: "italic" }}
+            onClick={() => {
+              onChange(ANY_FIELD);
+              setOpen(false);
+            }}
+          >
+            Any field — match this value on whichever field has it
+          </div>
           {items.map((name) => (
             <div
               key={name}

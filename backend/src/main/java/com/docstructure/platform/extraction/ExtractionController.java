@@ -1,8 +1,10 @@
 package com.docstructure.platform.extraction;
 
+import com.docstructure.platform.auth.AppPrincipal;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,10 +24,18 @@ public class ExtractionController {
         this.extractionService = extractionService;
     }
 
+    /**
+     * 202, not 201: a run resource is created synchronously (has a real id, is immediately
+     * gettable), but its outcome is not — the body reflects PENDING, not a finished result.
+     * Poll GET .../extraction-runs/{runId} (or the document's SSE stream) for the terminal
+     * status. See ExtractionService#enqueueExtraction.
+     */
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('EDITOR')")
     @PostMapping("/documents/{documentId}/extraction-runs")
-    public ResponseEntity<ExtractionRunResponse> trigger(@PathVariable UUID tenantId, @PathVariable UUID documentId) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(extractionService.triggerExtraction(tenantId, documentId));
+    public ResponseEntity<ExtractionRunResponse> trigger(@PathVariable UUID tenantId, @PathVariable UUID documentId,
+                                                           @AuthenticationPrincipal AppPrincipal principal) {
+        ExtractionRunResponse run = extractionService.enqueueExtraction(tenantId, documentId, principal.userId());
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(run);
     }
 
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('VIEWER')")

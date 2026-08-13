@@ -19,6 +19,10 @@ public interface DocumentRepository extends JpaRepository<Document, UUID> {
 
     Page<Document> findByTenantIdAndDocTypeOrderByCreatedAtDesc(UUID tenantId, String docType, Pageable pageable);
 
+    // Bulk re-extraction (see BulkReextractionService) — every document of a doc type, unpaged,
+    // since this feeds a loop that enqueues an extraction run per document rather than a UI page.
+    List<Document> findByTenantIdAndDocType(UUID tenantId, String docType);
+
     @Query("SELECT DISTINCT d.docType FROM Document d WHERE d.tenantId = :tenantId ORDER BY d.docType")
     List<String> findDistinctDocTypesByTenantId(@Param("tenantId") UUID tenantId);
 

@@ -26,6 +26,10 @@ services:
       db:
         condition: service_healthy
     environment:
+      # Switches logback-spring.xml to JSON console output (one line per event, MDC fields —
+      # requestId/tenantId/userId/... — as top-level JSON fields) instead of the human-readable
+      # pattern used for local `mvn test`/`spring-boot:run`. See logback-spring.xml.
+      SPRING_PROFILES_ACTIVE: docker
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-docstructure}
       # app_user (non-superuser) — see docs/DECISIONS.md for why RLS requires this over
       # POSTGRES_USER. This same value is also the Flyway placeholder that creates the role.

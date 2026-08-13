@@ -3,7 +3,10 @@ package com.docstructure.platform.documents;
 import com.docstructure.platform.auth.AppPrincipal;
 import com.docstructure.platform.common.ApiExceptions;
 import jakarta.validation.Valid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ContentDisposition;
@@ -32,6 +35,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/tenants/{tenantId}/documents")
 public class DocumentController {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentController.class);
 
     private final DocumentService documentService;
     private final DocumentEventService documentEventService;
@@ -103,13 +108,45 @@ public class DocumentController {
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('EDITOR')")
     @PatchMapping("/{documentId}/doc-type")
     public DocumentSummaryResponse updateDocType(@PathVariable UUID tenantId, @PathVariable UUID documentId,
-                                                  @Valid @RequestBody UpdateDocTypeRequest request) {
-        return documentService.updateDocType(tenantId, documentId, request.docType());
+                                                  @Valid @RequestBody UpdateDocTypeRequest request,
+                                                  @AuthenticationPrincipal AppPrincipal principal) {
+        return documentService.updateDocType(tenantId, documentId, request.docType(), principal.userId());
     }
 
+    /**
+     * Retries on a transient lock conflict with the background extraction worker (see
+     * ExtractionWorker/ExtractionService#performExtraction) — deleting a document while its own
+     * auto-triggered extraction is still running races the two transactions for the same
+     * documents row (the worker's extracted_data INSERT takes a FOR KEY SHARE lock on it via the
+     * FK), and Postgres's deadlock detector picks a victim essentially at random; sometimes
+     * that's this DELETE, not the worker. Retrying (each attempt is a genuinely fresh
+     * transaction via the DocumentService proxy — the previous attempt's rollback doesn't carry
+     * over) is the standard, correct response to that class of conflict rather than surfacing it
+     * as a 500. Not @Retryable/spring-retry: three attempts inline is simple enough not to need
+     * the extra dependency.
+     */
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('ADMIN')")
     @DeleteMapping("/{documentId}")
     public void delete(@PathVariable UUID tenantId, @PathVariable UUID documentId) {
-        documentService.delete(tenantId, documentId);
+        int attempt = 0;
+        while (true) {
+            try {
+                documentService.delete(tenantId, documentId);
+                return;
+            } catch (ConcurrencyFailureException e) {
+                attempt++;
+                if (attempt >= 3) {
+                    throw e;
+                }
+                log.warn("delete document={} tenant={} hit a concurrency conflict, retrying (attempt {}): {}",
+                        documentId, tenantId, attempt, e.toString());
+                try {
+                    Thread.sleep(25L * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
     }
 }

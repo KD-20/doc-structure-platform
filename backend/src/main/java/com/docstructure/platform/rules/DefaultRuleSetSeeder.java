@@ -69,6 +69,15 @@ public class DefaultRuleSetSeeder implements CommandLineRunner {
         ));
     }
 
+    // Real resumes aren't literal tables (no consistent column delimiters), so TABLE_UNDER_HEADING
+    // never matches anything under either section in practice — replaced with ANCHOR_REGEX
+    // capturing the whole free-text block following the heading (institution, location, company,
+    // dates — not just one keyword), which is both far more likely to actually extract something
+    // and far more useful to search/filter against afterward. Work history headings vary a lot
+    // more across templates than education ones do ("Experience" vs "Work History" vs
+    // "Employment History", observed across real uploaded resumes) — anchorRegexMulti tries each
+    // and uses whichever appears first; "Education" alone already substring-matches variants like
+    // "Education And Training" without needing a list.
     private RuleSetDefinition resume() {
         return new RuleSetDefinition("resume", List.of(
                 regexGlobal("email", "string", false,
@@ -77,10 +86,9 @@ public class DefaultRuleSetSeeder implements CommandLineRunner {
                         "(\\+?\\d{1,3}[-.\\s]?\\(?\\d{2,4}\\)?[-.\\s]?\\d{3,4}[-.\\s]?\\d{3,4})"),
                 regexGlobal("linkedin", "string", false,
                         "(linkedin\\.com/in/[A-Za-z0-9-]+)"),
-                tableUnderHeading("education", false, "Education",
-                        List.of("degree", "institution", "year")),
-                tableUnderHeading("work_experience", false, "Experience",
-                        List.of("title", "company", "dates"))
+                anchorRegex("education", "string", false, "Education", 500, "\\s*([\\s\\S]+)", null),
+                anchorRegexMulti("work_experience", "string", false,
+                        List.of("Experience", "Work History", "Employment History"), 600, "\\s*([\\s\\S]+)", null)
         ));
     }
 
@@ -110,6 +118,13 @@ public class DefaultRuleSetSeeder implements CommandLineRunner {
                                    int searchWindowChars, String pattern, NormalizerSpec normalizer) {
         return new FieldRule(name, type, required, "ANCHOR_REGEX",
                 Map.of("anchorText", anchorText, "searchWindowChars", searchWindowChars, "pattern", pattern),
+                normalizer);
+    }
+
+    private FieldRule anchorRegexMulti(String name, String type, boolean required, List<String> anchorTexts,
+                                        int searchWindowChars, String pattern, NormalizerSpec normalizer) {
+        return new FieldRule(name, type, required, "ANCHOR_REGEX",
+                Map.of("anchorTexts", anchorTexts, "searchWindowChars", searchWindowChars, "pattern", pattern),
                 normalizer);
     }
 

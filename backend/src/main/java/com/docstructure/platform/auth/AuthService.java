@@ -4,6 +4,8 @@ import com.docstructure.platform.common.ApiExceptions;
 import com.docstructure.platform.common.TenantScoped;
 import com.docstructure.platform.tenancy.Tenant;
 import com.docstructure.platform.tenancy.TenantRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -15,6 +17,8 @@ import java.util.UUID;
 
 @Service
 public class AuthService {
+
+    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
 
     private final UserRepository userRepository;
     private final TenantMembershipRepository membershipRepository;
@@ -34,21 +38,27 @@ public class AuthService {
     @Transactional
     public User register(String email, String rawPassword, String fullName) {
         if (userRepository.existsByEmail(email)) {
+            log.warn("registration rejected, email already in use email={}", email);
             throw new ApiExceptions.ConflictException("An account with this email already exists");
         }
         User user = new User();
         user.setEmail(email);
         user.setPasswordHash(passwordEncoder.encode(rawPassword));
         user.setFullName(fullName);
-        return userRepository.save(user);
+        user = userRepository.save(user);
+        log.info("user registered id={} email={}", user.getId(), email);
+        return user;
     }
 
     /** Identity-only token (no tenant claim) + every tenant the user belongs to, so the client can offer a picker. */
     @Transactional(readOnly = true)
     public LoginResponse login(String email, String rawPassword) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ApiExceptions.UnauthorizedException("Invalid email or password"));
-        if (!passwordEncoder.matches(rawPassword, user.getPasswordHash())) {
+        User user = userRepository.findByEmail(email).orElse(null);
+        if (user == null || !passwordEncoder.matches(rawPassword, user.getPasswordHash())) {
+            // Deliberately the same log line (and exception message) whether the email doesn't
+            // exist or the password is wrong — see the identical-response reasoning below; a
+            // more specific log message would defeat the same purpose for anyone tailing logs.
+            log.warn("failed login attempt email={}", email);
             throw new ApiExceptions.UnauthorizedException("Invalid email or password");
         }
 
@@ -65,6 +75,7 @@ public class AuthService {
                 .toList();
 
         String token = jwtService.generateToken(user.getId(), user.getEmail(), null, null);
+        log.info("login succeeded user={} tenantCount={}", user.getId(), summaries.size());
         return new LoginResponse(token, summaries);
     }
 
@@ -89,6 +100,7 @@ public class AuthService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ApiExceptions.UnauthorizedException("User no longer exists"));
         String token = jwtService.generateToken(userId, user.getEmail(), tenantId, role);
+        log.debug("tenant selected user={} tenant={} role={}", userId, tenantId, role);
         return new SelectTenantResponse(token, tenantId, role);
     }
 }

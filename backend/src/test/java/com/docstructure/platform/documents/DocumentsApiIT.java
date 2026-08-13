@@ -40,6 +40,12 @@ class DocumentsApiIT extends ApiTestBase {
                 new HttpEntity<>(form, headers.headers), Map.class);
     }
 
+    private UUID uploadReturningId(TenantFixture fixture, String filename, String content, String docType) {
+        ResponseEntity<Map> res = upload(fixture, fixture.ownerToken(), filename, content, docType);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        return UUID.fromString((String) res.getBody().get("id"));
+    }
+
     /** Small wrapper just to keep multipart Content-Type + bearer auth construction in one place. */
     private static class HttpHeadersMultipart {
         final org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
@@ -56,6 +62,72 @@ class DocumentsApiIT extends ApiTestBase {
         ResponseEntity<Map> res = upload(fixture, fixture.ownerToken(), "sample.txt", "Invoice Number: INV-1\nTotal: $10.00", null);
         assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(res.getBody().get("filename")).isEqualTo("sample.txt");
+    }
+
+    /**
+     * Regression test for a real live bug: content-based auto-classification (an earlier
+     * DocTypeClassifier#classify tier, since removed) labeled a plain "Commands" text file as
+     * "resume" and marked it STRUCTURED, purely because it contained a digit sequence
+     * ("Commands" happened to include something the shipped resume rule set's very loose phone
+     * regex matched) — that rule set's fields are all optional, so the "all required fields
+     * found" bonus applied unconditionally, pushing a single coincidental match over the
+     * confidence threshold. No doc type selected must never guess a specific business type from
+     * content anymore — see DocumentService#upload's javadoc.
+     */
+    @Test
+    void uploadWithNoDocTypeNeverGuessesABusinessTypeFromContent() {
+        TenantFixture fixture = createTenantWithOwner();
+        // No anchor words for any shipped default rule set (invoice/receipt/resume/contract/
+        // payslip) — just a phone-number-shaped digit run, exactly the kind of coincidental
+        // match that used to be enough on its own to win "resume".
+        ResponseEntity<Map> res = upload(fixture, fixture.ownerToken(), "Commands.txt",
+                "Build 4.10.2026, run with flags --port 555-123-4567 --retries 3", null);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(res.getBody().get("docType")).isNotEqualTo("resume");
+        assertThat(res.getBody().get("docType")).isEqualTo("text_document");
+        assertThat(res.getBody().get("status")).isEqualTo("TEXT_EXTRACTED");
+    }
+
+    /**
+     * Regression coverage for the UI's live-status feature: a document can genuinely finish
+     * processing with no structured fields at all (RuleBasedExtractionStrategy's UNSTRUCTURED
+     * fallback), and the frontend needs latestExtractionRunStatus (not just status, which stays
+     * TEXT_EXTRACTED either way) to tell that apart from "never even attempted" — see
+     * DocumentSummaryResponse's own javadoc.
+     */
+    @Test
+    void latestExtractionRunStatusDistinguishesNeverRunFromRanUnstructured() {
+        TenantFixture fixture = createTenantWithOwner();
+
+        UUID neverRunDocId = uploadReturningId(fixture, "explicit.txt", "just some content",
+                "it_never_run_" + uniqueSuffix());
+        ResponseEntity<Map> neverRunRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + neverRunDocId, HttpMethod.GET,
+                new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        assertThat(neverRunRes.getBody().get("status")).isEqualTo("TEXT_EXTRACTED");
+        assertThat(neverRunRes.getBody().get("latestExtractionRunStatus")).isNull();
+
+        // No explicit docType (classification path) with no matching rule set — auto-triggers,
+        // runs, and lands on UNSTRUCTURED (see DocumentService#upload's javadoc).
+        UUID autoRunDocId = uploadReturningId(fixture, "no_type.txt", "just some other content", null);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), autoRunDocId);
+        ResponseEntity<Map> autoRunRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + autoRunDocId, HttpMethod.GET,
+                new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        assertThat(autoRunRes.getBody().get("status")).isEqualTo("TEXT_EXTRACTED");
+        assertThat(autoRunRes.getBody().get("latestExtractionRunStatus")).isEqualTo("SUCCEEDED");
+
+        // Same distinction must survive in the list endpoint too (batched query, not just get()).
+        ResponseEntity<Map> listRes = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents?size=50", HttpMethod.GET,
+                new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        List<Map<String, Object>> content = (List<Map<String, Object>>) listRes.getBody().get("content");
+        Map<String, Object> neverRunInList = content.stream()
+                .filter(d -> d.get("id").equals(neverRunDocId.toString())).findFirst().orElseThrow();
+        Map<String, Object> autoRunInList = content.stream()
+                .filter(d -> d.get("id").equals(autoRunDocId.toString())).findFirst().orElseThrow();
+        assertThat(neverRunInList.get("latestExtractionRunStatus")).isNull();
+        assertThat(autoRunInList.get("latestExtractionRunStatus")).isEqualTo("SUCCEEDED");
     }
 
     @Test
@@ -205,6 +277,11 @@ class DocumentsApiIT extends ApiTestBase {
                 new HttpEntity<>(Map.of("docType", "new_type"), authHeaders(fixture.ownerToken())), Map.class);
         assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(res.getBody().get("docType")).isEqualTo("new_type");
+
+        // updateDocType re-triggers extraction (async) whenever there's raw text, regardless of
+        // whether "new_type" actually has a matching rule set — wait for it so @AfterEach's
+        // cleanup doesn't race the still-in-flight background run.
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
     }
 
     @Test

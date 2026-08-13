@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two profiles, one appender name (CONSOLE) so `logging.level.*` from application.yml keeps
+  working unchanged either way — Spring Boot applies those levels to the LoggerContext after
+  this file loads, regardless of what's hardcoded here.
+
+  Plain, human-readable text locally (mvn test / spring-boot:run) — that's what a person
+  watching a terminal wants. JSON (one line per event, all MDC fields — requestId, tenantId,
+  userId, guestLinkId, extractionRunId, see RequestLoggingFilter/JwtAuthFilter/GuestAuthFilter/
+  ExtractionWorker — as top-level fields) under the "docker" profile, which docker-compose.yml
+  activates for the deployed container, since that's the shape a real log aggregator expects.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProfile name="!docker">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] req=%X{requestId:-} tenant=%X{tenantId:-} %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <springProfile name="docker">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <customFields>{"application":"doc-structure-platform"}</customFields>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

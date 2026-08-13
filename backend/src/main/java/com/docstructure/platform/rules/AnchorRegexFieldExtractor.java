@@ -2,14 +2,19 @@ package com.docstructure.platform.rules;
 
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * params: anchorText (required), pattern (required regex, first capture group used if
- * present), searchWindowChars (default 200) — finds anchorText, then searches only the
- * following window for pattern. v1 only supports "nearest following" anchoring; a future
- * anchorMode value (e.g. PRECEDING) can be added as a pure config/interpreter change.
+ * params: anchorText (single string) or anchorTexts (list — alternative section-heading
+ * wordings, e.g. a resume's work-history section might be labeled "Experience", "Work History",
+ * or "Employment History" depending on the template; whichever one actually appears earliest in
+ * the document wins, so this doesn't require every document to use the same wording). One of the
+ * two is required. pattern (required regex, first capture group used if present),
+ * searchWindowChars (default 200) — finds the anchor, then searches only the following window
+ * for pattern. v1 only supports "nearest following" anchoring; a future anchorMode value (e.g.
+ * PRECEDING) can be added as a pure config/interpreter change.
  */
 @Component("ANCHOR_REGEX")
 public class AnchorRegexFieldExtractor implements FieldExtractor {
@@ -20,15 +25,30 @@ public class AnchorRegexFieldExtractor implements FieldExtractor {
             return FieldExtractionResult.notFound();
         }
         RuleParams params = new RuleParams(rule.params());
-        String anchorText = params.requireString("anchorText");
+        List<String> anchorCandidates = params.getStringList("anchorTexts", null);
+        if (anchorCandidates == null) {
+            anchorCandidates = List.of(params.requireString("anchorText"));
+        }
         String patternStr = params.requireString("pattern");
         int windowChars = params.getInt("searchWindowChars", 200);
 
-        int anchorIdx = rawText.toLowerCase().indexOf(anchorText.toLowerCase());
+        String lowerText = rawText.toLowerCase();
+        int anchorIdx = -1;
+        int anchorLen = 0;
+        for (String candidate : anchorCandidates) {
+            if (candidate == null || candidate.isBlank()) {
+                continue;
+            }
+            int idx = lowerText.indexOf(candidate.toLowerCase());
+            if (idx >= 0 && (anchorIdx < 0 || idx < anchorIdx)) {
+                anchorIdx = idx;
+                anchorLen = candidate.length();
+            }
+        }
         if (anchorIdx < 0) {
             return FieldExtractionResult.notFound();
         }
-        int windowStart = anchorIdx + anchorText.length();
+        int windowStart = anchorIdx + anchorLen;
         int windowEnd = Math.min(rawText.length(), windowStart + windowChars);
         String window = rawText.substring(windowStart, windowEnd);
 
