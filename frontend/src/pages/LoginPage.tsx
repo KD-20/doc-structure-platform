@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { errorMessage } from "../api/client";
+import { StructureIcon } from "../components/icons";
+import { BackButton } from "../components/BackButton";
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -28,12 +30,19 @@ export function LoginPage() {
   return (
     <div className="centered-auth">
       <div className="card auth-card">
-        <h1>DocStructure</h1>
+        <BackButton fallback="/" />
+        <Link to="/" className="auth-logo" title="Back to home">
+          <div className="auth-logo-mark">
+            <StructureIcon />
+          </div>
+          <h1>DocStructure</h1>
+        </Link>
+        <p className="auth-subtitle">Welcome back — sign in to your tenant.</p>
         {error && <div className="error-banner">{error}</div>}
         <form onSubmit={handleSubmit}>
           <div className="form-row">
             <label>Email</label>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required autoFocus />
           </div>
           <div className="form-row">
             <label>Password</label>
@@ -43,9 +52,11 @@ export function LoginPage() {
             {loading ? "Signing in..." : "Sign in"}
           </button>
         </form>
-        <p className="muted" style={{ marginTop: 12 }}>
-          No account? <Link to="/register">Register</Link>
-        </p>
+        <div className="auth-footer">
+          <span className="muted">
+            No account? <Link to="/register">Register</Link>
+          </span>
+        </div>
       </div>
     </div>
   );

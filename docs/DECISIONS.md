@@ -152,7 +152,7 @@ v1 originally kept the access token in a JS variable only, on the reasoning that
 
 ### 7b. Spring AOP self-invocation would silently skip `@TenantScoped`/`@Transactional` — this shaped the whole service layer
 
-Spring's proxy-based AOP only intercepts calls that go through the bean proxy; a method calling another method on `this` bypasses the proxy entirely, silently skipping any `@Transactional`/`@TenantScoped` annotations on the callee. Caught in practice in `AuthService.selectTenant` and `TenantService`'s tenant-creation flow. The fix, applied consistently: annotations always sit on the externally-invoked entry-point method itself; a method needing to call another transactional operation calls a **different bean** (or has the controller make two separate calls), never `this.otherAnnotatedMethod()`.
+Spring's proxy-based AOP only intercepts calls that go through the bean proxy; a method calling another method on `this` bypasses the proxy entirely, silently skipping any `@Transactional`/`@TenantScoped` annotations on the callee. Caught in practice in `AuthService.selectTenant`, `TenantService`'s tenant-creation flow, and — the most consequential instance — `BulkReextractionDispatcher` (§10a): the first version of its `@Async` entry point called `reextractByDocType(...)` on its *own* bean, which silently skipped `@TenantScoped`'s `set_config` call. There was no error; the RLS-filtered query underneath just legitimately returned zero rows, so the bug read as "re-extraction quietly does nothing" rather than a crash — the quietest, hardest-to-notice failure mode this gotcha can produce. The fix, applied consistently: annotations always sit on the externally-invoked entry-point method itself; a method needing to call another transactional operation calls a **different bean** (or has the controller make two separate calls), never `this.otherAnnotatedMethod()`.
 
 ### 7c. A nested `@Transactional` method throwing marks the whole transaction rollback-only — even if the caller catches it
 
@@ -194,15 +194,25 @@ The original plan assumed a separate limited-privilege app role could have `UPDA
 
 ---
 
-## 10. Extraction pipeline: synchronous inline, not an async job queue
+## 10. Extraction pipeline: async job queue, not synchronous inline
 
-**Alternatives:** A `PENDING`-queue + background worker pattern (the schema explicitly supports this: `extraction_runs.status` is `PENDING/RUNNING/SUCCEEDED/FAILED`).
+**Alternatives:** Run structured extraction inline within the HTTP request (v1's original design — see below); a full external queue (SQS/RabbitMQ/etc.) instead of an in-process one.
 
-**Why chosen:** v1 runs text extraction (upload time) and structured extraction (on-demand trigger) inline within the HTTP request. Simpler to build and reason about; the status model was designed to support a real async worker picking up `PENDING` rows later without any API or schema changes — only the request handler's internals would change from "do the work" to "enqueue the work."
+**Why chosen:** Text extraction (Tika) still runs inline at upload time — it's fast and the raw text is needed immediately for the response. Structured extraction does not: `ExtractionService.enqueueExtraction` does only the fast part (validate, resolve strategy, create a `PENDING` run row, publish `ExtractionRequestedEvent`) and returns; `ExtractionWorker`, `@Async("extractionExecutor") @TransactionalEventListener(phase = AFTER_COMMIT)`, picks the event up on a background thread and does the actual work via `ExtractionService.performExtraction`. `AFTER_COMMIT` matters specifically: it guarantees the worker never races the enqueueing transaction's own `PENDING` row INSERT. The `PENDING/RUNNING/SUCCEEDED/FAILED` status model already anticipated this from v1's initial schema design — switching to it needed no API or schema changes, only the request handler's internals changing from "do the work" to "enqueue the work." The frontend surfaces the in-flight state live via SSE (`DocumentEventService`) rather than requiring a manual refresh.
 
-**Why declined:** A queue+worker needs its own retry/backoff/crash-recovery logic, which is real scope not justified until document volumes or processing latency make synchronous handling impractical.
+**Why declined (a full external queue):** An in-process `ThreadPoolTaskExecutor` (`AsyncConfig`, bounded: core 2 / max 8 / queue 200, caller-runs on saturation rather than dropping work) is sufficient at single-instance scale and adds no new infrastructure dependency. Genuinely necessary once horizontally scaled — an in-process queue's state (and the events it publishes) doesn't survive a restart or exist on other instances.
 
-**Revisit trigger:** Extraction latency becomes user-visible/blocking at realistic document sizes, or OCR-heavy documents make request timeouts a problem.
+**Revisit trigger:** Horizontal scaling (an in-process executor's queue and `DocumentEventService`'s in-memory SSE subscriber list are both single-instance-only), or extraction volume outgrowing what one instance's bounded pool can absorb even with `caller-runs` degradation.
+
+### 10a. Bulk re-extraction dispatch on a rule set change is also async — and batching is a known gap, not yet built
+
+Saving a new rule set version or activating an older one re-syncs every existing document of that doc type (`BulkReextractionService.reextractByDocType` — otherwise a rule set change only affects documents uploaded/extracted afterward, and an existing document silently keeps whatever its last run produced). That re-sync is dispatched via `BulkReextractionDispatcher.reextractByDocTypeAsync` (`@Async`, its own dedicated executor — see below) rather than run inline in the `PUT`/`activate` request, so saving a rule set returns as soon as the version itself is written, not after every matching document has been re-enqueued.
+
+**Own dedicated executor, not `extractionExecutor`:** tried sharing the extraction pipeline's own pool first; under concurrent load a busy extraction queue could delay this "should be near-instant" administrative dispatch well past what an admin saving a rule set would expect (confirmed live as test flakiness before the pools were split). `AsyncConfig.bulkReextractionExecutor` is intentionally small (core 1 / max 4 / queue 50) — this dispatch step is lightweight (find matching documents, enqueue each), not the heavy work itself.
+
+**Known gap — no batching for very large document sets:** `reextractByDocType` loads every matching document for the tenant+docType in one `findByTenantIdAndDocType` query and loops over all of them synchronously within its own transaction before returning. Fine at realistic v1 volumes (each iteration is one small `enqueueExtraction` call); for a tenant with a very large number of documents of one type, this becomes a single long-running transaction holding a growing set of row locks, and a large `List<Document>` held in memory at once. The fix, not yet built: page through matching documents in fixed-size batches (e.g. 200 at a time) across multiple shorter transactions rather than one unbounded one — same shape as `DocumentRepository`'s existing paged list queries, just applied here too.
+
+**Revisit trigger:** A tenant's per-doc-type document count reaches a size where this loop's single transaction becomes a measurable lock-contention or memory concern — batch it before that, not after it's already been observed as a problem.
 
 ---
 
@@ -249,7 +259,7 @@ The `db` service's host port defaults to `5433` and `app`'s to `8081` (both over
 - **No refresh-token rotation / server-side logout** (§7) — single access token, client-side discard only.
 - **Semantic search is wired but inert** (§5a) — `NoOpEmbeddingProvider` until a real provider is added.
 - **LLM extraction is wired but inert** (§3) — `LlmExtractionStrategy` throws `UnsupportedOperationException` until implemented.
-- **No async extraction queue** (§10) — synchronous inline processing.
+- **Bulk re-extraction on a rule set change is not batched** (§10a) — one query loads every matching document at once, one transaction enqueues all of them; fine at v1 volumes, a real limit for a tenant with a very large number of documents of one doc type.
 - **Table extraction (`TABLE_UNDER_HEADING`) is heuristic** — splits on runs of 2+ whitespace characters; irregular whitespace or wrapped cells will misparse.
 - **OCR quality depends on Tesseract being present** — bundled in the Docker image, must be installed separately for non-Docker local dev (see README).
 - **This session's automated tests run against `docker compose up -d db` directly, not Testcontainers** — the dev sandbox's Docker Desktop `/info` API wasn't compatible with the Testcontainers 1.20.3 client library (unrelated to this codebase); `TenantContextAspectIT` documents this and the manual alternative in its own javadoc.

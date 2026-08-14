@@ -6,6 +6,7 @@ import { StatusPill } from "../components/StatusPill";
 import { PipelineSteps } from "../components/PipelineSteps";
 import { FieldsTable } from "../components/FieldsTable";
 import { UploadIcon } from "../components/icons";
+import { BackButton } from "../components/BackButton";
 
 /**
  * The no-login "try it before you subscribe" flow — see backend PublicDemoController. A
@@ -95,6 +96,7 @@ export function TryItPage() {
 
   return (
     <div className="main" style={{ maxWidth: 700, margin: "0 auto" }}>
+      <BackButton fallback="/" />
       <h1>Try it without an account</h1>
       <p className="muted">
         Upload a document and see it structured automatically — no account needed. Limited to{" "}

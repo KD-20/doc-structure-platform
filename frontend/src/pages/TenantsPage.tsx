@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiClient, errorMessage } from "../api/client";
 import type { CreateTenantResponse } from "../api/types";
+import { BackButton } from "../components/BackButton";
 
 export function TenantsPage() {
   const { tenants, selectTenant, adoptCreatedTenant, logout, email } = useAuth();
@@ -50,6 +51,7 @@ export function TenantsPage() {
   return (
     <div className="centered-auth">
       <div className="card" style={{ width: 480 }}>
+        <BackButton fallback="/" />
         <div className="topbar">
           <h1 style={{ fontSize: 20 }}>Your tenants</h1>
           <button className="secondary" onClick={logout}>

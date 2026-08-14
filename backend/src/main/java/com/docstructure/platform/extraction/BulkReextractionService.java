@@ -15,14 +15,21 @@ import java.util.UUID;
  * Re-syncs already-uploaded documents with a rule set change. Without this, updating (or
  * activating an older version of) a rule set only affects documents uploaded/extracted from
  * that point on — every existing document of that doc type silently keeps whatever its last run
- * produced until someone manually re-triggers each one individually. Called two ways: manually
- * (RuleSetController's own reextract endpoint) and automatically, right after a rule set version
- * is created or activated (see RuleSetController).
+ * produced until someone manually re-triggers each one individually. Called two ways: manually,
+ * synchronously, right here (RuleSetController's own reextract endpoint, which needs the
+ * enqueued/skipped counts back immediately to show in the UI) and automatically, asynchronously
+ * (see BulkReextractionDispatcher), right after a rule set version is created or activated.
  *
  * A separate bean from ExtractionService rather than a method on it: enqueueExtraction is called
  * per document in a loop here, and that call needs to cross a real Spring proxy boundary for its
  * own @TenantScoped/@Transactional to actually apply (see ExtractionWorker's javadoc on the
- * self-invocation gotcha) — trivially true when the caller is a different bean.
+ * self-invocation gotcha) — trivially true when the caller is a different bean. The async entry
+ * point lives on BulkReextractionDispatcher, a separate bean again, for exactly the same reason:
+ * an @Async method calling reextractByDocType on ITS OWN bean would be a self-invocation too,
+ * silently skipping @TenantScoped's set_config entirely — confirmed live as a real bug (the
+ * first version of this split had that exact mistake: async dispatch and the @TenantScoped
+ * method on the same bean, RLS then filtered out every document since the tenant was never
+ * actually bound for that call, and the bulk reextract silently enqueued nothing at all).
  */
 @Service
 public class BulkReextractionService {

@@ -87,6 +87,14 @@ export function ArrowRightIcon(_: IconProps) {
   );
 }
 
+export function ArrowLeftIcon(_: IconProps) {
+  return (
+    <svg {...common}>
+      <path d="M19 12H5M11 18l-6-6 6-6" />
+    </svg>
+  );
+}
+
 export function DownloadIcon(_: IconProps) {
   return (
     <svg {...common}>

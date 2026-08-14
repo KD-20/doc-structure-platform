@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { isAdminRole } from "../auth/roles";
+import { BackButton } from "./BackButton";
 
 export function Layout({ children }: { children: ReactNode }) {
   const { tenantId, tenantName, role, email, logout } = useAuth();
@@ -39,7 +40,10 @@ export function Layout({ children }: { children: ReactNode }) {
           </button>
         </div>
       </nav>
-      <main className="main">{children}</main>
+      <main className="main">
+        <BackButton fallback={`${base}/dashboard`} />
+        {children}
+      </main>
     </div>
   );
 }

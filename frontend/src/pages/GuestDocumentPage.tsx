@@ -4,6 +4,7 @@ import { errorMessage, guestClient } from "../api/client";
 import type { GuestDocument } from "../api/types";
 import { StatusPill } from "../components/StatusPill";
 import { FieldsTable } from "../components/FieldsTable";
+import { BackButton } from "../components/BackButton";
 
 export function GuestDocumentPage() {
   const { token, documentId } = useParams();
@@ -20,6 +21,7 @@ export function GuestDocumentPage() {
 
   return (
     <div className="main" style={{ maxWidth: 700, margin: "0 auto" }}>
+      <BackButton fallback="/" />
       <h1>Shared document</h1>
       {error && <div className="error-banner">{error}</div>}
       {doc && (

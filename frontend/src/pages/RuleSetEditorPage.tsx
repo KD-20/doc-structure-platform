@@ -21,12 +21,15 @@ const TEMPLATE: RuleSetDefinition = {
   ],
 };
 
-// The three "kinds" the simple editor knows how to render as plain inputs. Anything else
-// (REGEX_GLOBAL, or an ANCHOR_REGEX with a hand-written pattern) still shows up — just as a
-// read-only note pointing at Advanced (JSON) — rather than being hidden or silently dropped.
-function fieldKind(field: FieldRule): "anchor" | "table" | "advanced" {
+// The four "kinds" the simple editor knows how to render as plain, editable inputs. Anything
+// else still shows up — just as a read-only note pointing at Advanced (JSON) — rather than being
+// hidden or silently dropped, but that's now the exception rather than every REGEX_GLOBAL field
+// (email/phone/linkedin-style fields with no anchor label, common enough to deserve a real row
+// instead of forcing JSON mode just to edit one pattern).
+function fieldKind(field: FieldRule): "anchor" | "table" | "global" | "advanced" {
   if (field.strategy === "TABLE_UNDER_HEADING") return "table";
   if (field.strategy === "ANCHOR_REGEX") return "anchor";
+  if (field.strategy === "REGEX_GLOBAL") return "global";
   return "advanced";
 }
 
@@ -67,6 +70,40 @@ function newAnchorField(): FieldRule {
   };
 }
 
+// An ANCHOR_REGEX field with no anchor text isn't a smaller version of an anchored field — it's
+// a different strategy entirely (search the whole document, not "near this label"). Left as
+// ANCHOR_REGEX with a blank anchorText, it reaches the backend's AnchorRegexFieldExtractor,
+// which requires a non-blank anchor and throws — and that throw aborts extraction for the whole
+// document, not just this one field (confirmed live: every field on affected documents came back
+// empty because of one blank-labeled field). Falling back to REGEX_GLOBAL here, at the save/
+// preview boundary, means an admin who just doesn't fill in "Label to find it near" gets a
+// working global-pattern field instead of a document-wide crash — matching how the read-only
+// row already describes an unlabeled/custom field elsewhere in this editor.
+function withoutBlankAnchors(def: RuleSetDefinition): RuleSetDefinition {
+  return {
+    ...def,
+    fields: def.fields.map((f) => {
+      if (f.strategy !== "ANCHOR_REGEX" || ((f.params.anchorText as string) ?? "").trim()) {
+        return f;
+      }
+      const { anchorText, searchWindowChars, ...rest } = f.params;
+      return { ...f, strategy: "REGEX_GLOBAL", params: rest };
+    }),
+  };
+}
+
+function newGlobalField(): FieldRule {
+  const { pattern, normalizer, fieldType } = defaultsForType("text");
+  return {
+    name: "",
+    type: fieldType,
+    required: false,
+    strategy: "REGEX_GLOBAL",
+    params: { pattern },
+    normalizer,
+  };
+}
+
 function newTableField(): FieldRule {
   return {
     name: "",
@@ -83,6 +120,13 @@ export function RuleSetEditorPage() {
   const [searchParams] = useSearchParams();
   const version = searchParams.get("version");
   const fromDefault = searchParams.get("fromDefault") === "1";
+  // Plain read-only display — field list + JSON toggle, no add-field/save/activate/preview
+  // controls at all. Distinct from canEdit below: that only disables individual inputs on the
+  // full editor form, which still visually offers editing (grayed-out add-field buttons and
+  // all) even to someone who can't use it. "View" (see RuleSetsPage) links here explicitly;
+  // "Edit"/"Customize" don't set this and get the full form as before.
+  const viewOnly = searchParams.get("mode") === "view";
+  const [viewJson, setViewJson] = useState(false);
   const navigate = useNavigate();
   const isNew = docType === "new";
   const { role } = useAuth();
@@ -163,6 +207,10 @@ export function RuleSetEditorPage() {
     setDefinition((prev) => ({ ...prev, fields: [...prev.fields, newTableField()] }));
   }
 
+  function addGlobalField() {
+    setDefinition((prev) => ({ ...prev, fields: [...prev.fields, newGlobalField()] }));
+  }
+
   function openJsonMode() {
     setJsonDraft(JSON.stringify(definition, null, 2));
     setMode("json");
@@ -180,9 +228,9 @@ export function RuleSetEditorPage() {
   }
 
   function currentDefinition(): RuleSetDefinition | null {
-    if (mode === "simple") return definition;
+    if (mode === "simple") return withoutBlankAnchors(definition);
     try {
-      return JSON.parse(jsonDraft) as RuleSetDefinition;
+      return withoutBlankAnchors(JSON.parse(jsonDraft) as RuleSetDefinition);
     } catch {
       setError("Definition is not valid JSON");
       return null;
@@ -257,6 +305,46 @@ export function RuleSetEditorPage() {
     } finally {
       setReextracting(false);
     }
+  }
+
+  if (viewOnly) {
+    return (
+      <div>
+        <h1>{docType} {version ? `— v${version}` : ""}</h1>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h2 style={{ fontSize: 15, margin: 0 }}>Fields</h2>
+            <button type="button" className="secondary small" onClick={() => setViewJson((v) => !v)}>
+              {viewJson ? "View as fields" : "View as JSON"}
+            </button>
+          </div>
+          {viewJson ? (
+            <pre className="json-view" style={{ whiteSpace: "pre-wrap" }}>
+              {JSON.stringify(definition, null, 2)}
+            </pre>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {definition.fields.map((field, i) => (
+                  <tr key={i}>
+                    <td>{field.name}</td>
+                    <td className="muted">{field.type}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {definition.fields.length === 0 && !viewJson && <p className="muted">No fields defined.</p>}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -378,6 +466,47 @@ export function RuleSetEditorPage() {
                     </div>
                   );
                 }
+                if (kind === "global") {
+                  return (
+                    <div className="rule-field-row" key={i}>
+                      <input
+                        value={field.name}
+                        onChange={(e) => updateField(i, { name: e.target.value })}
+                        placeholder="e.g. email"
+                        disabled={!canEdit}
+                      />
+                      <input
+                        value={(field.params.pattern as string) ?? ""}
+                        onChange={(e) => updateFieldParams(i, { pattern: e.target.value })}
+                        placeholder="Regex pattern, searched anywhere in the document"
+                        disabled={!canEdit}
+                      />
+                      <select
+                        value={detectSimpleType(field)}
+                        onChange={(e) => changeFieldType(i, e.target.value as SimpleFieldType)}
+                        disabled={!canEdit}
+                      >
+                        <option value="text">Text</option>
+                        <option value="date">Date</option>
+                        <option value="currency">Currency</option>
+                      </select>
+                      <input
+                        type="checkbox"
+                        checked={field.required}
+                        onChange={(e) => updateField(i, { required: e.target.checked })}
+                        disabled={!canEdit}
+                      />
+                      <button
+                        type="button"
+                        className="danger icon-btn"
+                        onClick={() => removeField(i)}
+                        disabled={!canEdit}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                }
                 return (
                   <div className="rule-field-row" key={i}>
                     <input
@@ -409,6 +538,9 @@ export function RuleSetEditorPage() {
               </button>
               <button type="button" className="secondary small" onClick={addTableField} disabled={!canEdit}>
                 + Add table field
+              </button>
+              <button type="button" className="secondary small" onClick={addGlobalField} disabled={!canEdit}>
+                + Add pattern field
               </button>
               <button type="button" className="secondary small" onClick={openJsonMode} style={{ marginLeft: "auto" }}>
                 Advanced (JSON)

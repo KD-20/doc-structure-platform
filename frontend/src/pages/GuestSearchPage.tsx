@@ -4,6 +4,7 @@ import { errorMessage, guestClient } from "../api/client";
 import type { SearchResponse } from "../api/types";
 import { StatusPill } from "../components/StatusPill";
 import { FieldsTable } from "../components/FieldsTable";
+import { BackButton } from "../components/BackButton";
 
 export function GuestSearchPage() {
   const { token } = useParams();
@@ -24,6 +25,7 @@ export function GuestSearchPage() {
 
   return (
     <div className="main" style={{ maxWidth: 700, margin: "0 auto" }}>
+      <BackButton fallback="/" />
       <h1>Search shared documents</h1>
       {error && <div className="error-banner">{error}</div>}
       <div className="card">

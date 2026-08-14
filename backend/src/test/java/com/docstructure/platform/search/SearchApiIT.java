@@ -47,15 +47,10 @@ class SearchApiIT extends ApiTestBase {
                 HttpMethod.POST, new HttpEntity<>(form, headers), Map.class);
         UUID docId = UUID.fromString((String) res.getBody().get("id"));
 
-        // Extraction is async (see ExtractionService#enqueueExtraction) — the explicit trigger
-        // below is redundant with upload's own auto-trigger (the rule set is already active by
-        // the time it uploads) but harmless; either way, callers here need extracted_data to
-        // actually exist before they search/filter on it, so wait for a terminal run status.
-        ResponseEntity<Map> triggerRes = rest.exchange(
-                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
-                HttpMethod.POST, new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
-        UUID runId = UUID.fromString((String) triggerRes.getBody().get("id"));
-        waitForTerminalRunStatus(fixture.tenantId(), fixture.ownerToken(), runId);
+        // Explicit docType matching an already-active rule set auto-triggers at upload time
+        // (see DocumentService's upload javadoc) — callers here need extracted_data to actually
+        // exist before they search/filter on it, so wait for that run to reach a terminal status.
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
         return docId;
     }
 

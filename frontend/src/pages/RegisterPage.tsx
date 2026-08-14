@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiClient, errorMessage } from "../api/client";
+import { StructureIcon } from "../components/icons";
+import { BackButton } from "../components/BackButton";
 
 export function RegisterPage() {
   const navigate = useNavigate();
@@ -27,12 +29,19 @@ export function RegisterPage() {
   return (
     <div className="centered-auth">
       <div className="card auth-card">
-        <h1>Create account</h1>
+        <BackButton fallback="/" />
+        <Link to="/" className="auth-logo" title="Back to home">
+          <div className="auth-logo-mark">
+            <StructureIcon />
+          </div>
+          <h1>DocStructure</h1>
+        </Link>
+        <p className="auth-subtitle">Create your account to get started.</p>
         {error && <div className="error-banner">{error}</div>}
         <form onSubmit={handleSubmit}>
           <div className="form-row">
             <label>Full name</label>
-            <input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+            <input value={fullName} onChange={(e) => setFullName(e.target.value)} required autoFocus />
           </div>
           <div className="form-row">
             <label>Email</label>
@@ -46,9 +55,11 @@ export function RegisterPage() {
             {loading ? "Creating..." : "Create account"}
           </button>
         </form>
-        <p className="muted" style={{ marginTop: 12 }}>
-          Already have an account? <Link to="/login">Sign in</Link>
-        </p>
+        <div className="auth-footer">
+          <span className="muted">
+            Already have an account? <Link to="/login">Sign in</Link>
+          </span>
+        </div>
       </div>
     </div>
   );

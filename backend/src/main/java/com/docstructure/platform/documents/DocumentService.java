@@ -9,6 +9,7 @@ import com.docstructure.platform.extraction.ExtractionRunStatus;
 import com.docstructure.platform.extraction.ExtractionService;
 import com.docstructure.platform.extraction.ExtractionStrategyFactory;
 import com.docstructure.platform.extraction.LlmExtractionStrategy;
+import com.docstructure.platform.rules.RuleSetService;
 import com.docstructure.platform.storage.StorageService;
 import com.docstructure.platform.tenancy.Tenant;
 import com.docstructure.platform.tenancy.TenantRepository;
@@ -44,13 +45,14 @@ public class DocumentService {
     private final TenantRepository tenantRepository;
     private final DocumentEventService documentEventService;
     private final MeterRegistry meterRegistry;
+    private final RuleSetService ruleSetService;
 
     public DocumentService(DocumentRepository documentRepository, StorageService storageService,
                             TikaTextExtractor textExtractor, DocTypeClassifier docTypeClassifier,
                             ExtractionService extractionService, ExtractionRunRepository extractionRunRepository,
                             ExtractionStrategyFactory extractionStrategyFactory,
                             TenantRepository tenantRepository, DocumentEventService documentEventService,
-                            MeterRegistry meterRegistry) {
+                            MeterRegistry meterRegistry, RuleSetService ruleSetService) {
         this.documentRepository = documentRepository;
         this.storageService = storageService;
         this.textExtractor = textExtractor;
@@ -61,6 +63,7 @@ public class DocumentService {
         this.tenantRepository = tenantRepository;
         this.documentEventService = documentEventService;
         this.meterRegistry = meterRegistry;
+        this.ruleSetService = ruleSetService;
     }
 
     /**
@@ -78,15 +81,20 @@ public class DocumentService {
      * resume rule set to get labeled "resume" and marked STRUCTURED). No doc type selected now
      * always means exactly that — type not known — rather than a guess dressed up as a fact.
      * <p>
-     * Extraction (async, see ExtractionService#enqueueExtraction) still auto-triggers whenever
-     * docType was left for classification, so a with-no-doc-type upload still ends up embedded
-     * for semantic/fuzzy search via RuleBasedExtractionStrategy's UNSTRUCTURED fallback — it just
+     * Extraction (async, see ExtractionService#enqueueExtraction) auto-triggers whenever docType
+     * was left for classification, so a with-no-doc-type upload still ends up embedded for
+     * semantic/fuzzy search via RuleBasedExtractionStrategy's UNSTRUCTURED fallback — it just
      * can't be miscategorized as a specific business type it was never told and can't safely
      * infer. A tenant configured for LLM extraction (which never needs a rule set for any doc
-     * type) always auto-triggers too, explicit docType or not. An explicitly-typed upload on a
-     * RULE_BASED tenant with no matching rule set does NOT auto-trigger — the uploader named a
-     * real type, so leaving it for a manual retrigger (or a doc-type change, which already
-     * always retriggers) once a rule set exists is more useful than silently embedding it now.
+     * type) always auto-triggers too, explicit docType or not. An explicitly-typed upload also
+     * auto-triggers when a rule set (tenant-custom or platform default) actually resolves for
+     * that docType — the uploader named a real, working type, there's no reason to make them
+     * click "run" separately (confirmed live as a real gap: uploading with docType "resume",
+     * which already has a working custom rule set, silently sat at "Structured — Not yet run"
+     * until manually triggered). Only genuinely skipped when the explicit docType has no rule
+     * set at all — nothing would happen anyway, so leaving it for a manual retrigger (or a
+     * doc-type change, which already always retriggers) once a rule set exists is more useful
+     * than silently embedding it now.
      */
     @TenantScoped
     @Transactional
@@ -155,7 +163,7 @@ public class DocumentService {
 
         // See the method javadoc for exactly which case this covers and which it doesn't.
         boolean shouldAutoTrigger = status == DocumentStatus.TEXT_EXTRACTED
-                && (wasClassified || usesLlmExtraction(tenantId));
+                && (wasClassified || usesLlmExtraction(tenantId) || hasResolvableRuleSet(tenantId, docType));
         if (shouldAutoTrigger) {
             try {
                 // Async now (see ExtractionService#enqueueExtraction) — doc stays at
@@ -186,6 +194,16 @@ public class DocumentService {
             // actual error rather than this best-effort upload-time check.
             return false;
         }
+    }
+
+    /**
+     * Same resolution RuleBasedExtractionStrategy itself would use at extraction time (tenant's
+     * own active rule set for this doc type, falling back to a platform default) — an explicit
+     * docType that resolves to a real rule set here is worth auto-triggering for, same as the
+     * classification path already does unconditionally.
+     */
+    private boolean hasResolvableRuleSet(UUID tenantId, String docType) {
+        return ruleSetService.resolveDefinition(tenantId, docType).isPresent();
     }
 
     /** Null when no extraction run has ever existed for this document — see DocumentSummaryResponse's own javadoc. */

@@ -130,6 +130,36 @@ class DocumentsApiIT extends ApiTestBase {
         assertThat(autoRunInList.get("latestExtractionRunStatus")).isEqualTo("SUCCEEDED");
     }
 
+    /**
+     * Regression test for a real gap: DocumentService's own auto-trigger javadoc always claimed
+     * an explicit docType auto-triggers "when a rule set actually resolves for it", but the code
+     * only ever checked wasClassified/LLM — an explicit docType matching a real, working rule
+     * set (e.g. uploading as "resume" when a resume rule set already exists) silently sat at
+     * "Structured — Not yet run" until someone clicked the manual retrigger. Confirmed live
+     * before this was fixed. Distinct from the "no matching rule set" case covered by
+     * latestExtractionRunStatusDistinguishesNeverRunFromRanUnstructured, which must still NOT
+     * auto-trigger.
+     */
+    @Test
+    void uploadWithExplicitDocTypeMatchingAnActiveRuleSetAutoTriggers() {
+        TenantFixture fixture = createTenantWithOwner();
+        String docType = "it_explicit_autotrigger_" + uniqueSuffix();
+        rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
+                new HttpEntity<>(Map.of("definition", Map.of("docType", docType, "fields", List.of(
+                        Map.of("name", "marker", "type", "string", "required", false, "strategy", "REGEX_GLOBAL",
+                                "params", Map.of("pattern", "(MARK-\\d+)"))))),
+                        authHeaders(fixture.ownerToken())), Map.class);
+
+        UUID docId = uploadReturningId(fixture, "explicit_with_rule_set.txt", "Reference MARK-4321 here.", docType);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
+
+        ResponseEntity<Map> res = rest.exchange(
+                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId, HttpMethod.GET,
+                new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
+        assertThat(res.getBody().get("status")).isEqualTo("STRUCTURED");
+        assertThat(res.getBody().get("latestExtractionRunStatus")).isEqualTo("SUCCEEDED");
+    }
+
     @Test
     void uploadWithExplicitDocTypeIsRespected() {
         TenantFixture fixture = createTenantWithOwner();

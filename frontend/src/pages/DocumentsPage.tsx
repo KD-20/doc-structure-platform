@@ -9,6 +9,7 @@ import { TypeaheadInput } from "../components/TypeaheadInput";
 import { RefreshIcon, UploadIcon } from "../components/icons";
 import { formatCategoryForDocType, formatCategoryForFilename, formatLabel } from "../utils/docTypeFormat";
 import { displayStatus } from "../utils/documentDisplayStatus";
+import { fixedPanelPositionBelow, type FixedPosition } from "../utils/floatingPosition";
 import { useAuth } from "../auth/AuthContext";
 import { isAdminRole, isEditorRole } from "../auth/roles";
 
@@ -55,8 +56,14 @@ export function DocumentsPage() {
   // opens (and refetched live whenever an SSE event arrives for that same document while
   // it's open — see the document-status listener below).
   const [openStatusDocId, setOpenStatusDocId] = useState<string | null>(null);
+  const [statusPanelPos, setStatusPanelPos] = useState<FixedPosition | null>(null);
   const [historyByDoc, setHistoryByDoc] = useState<Record<string, ExtractionRun[]>>({});
   const [loadingHistoryFor, setLoadingHistoryFor] = useState<string | null>(null);
+
+  function closeStatusDropdown() {
+    setOpenStatusDocId(null);
+    setStatusPanelPos(null);
+  }
 
   useEffect(() => {
     function closeOnOutsideClick(e: globalThis.MouseEvent) {
@@ -65,18 +72,46 @@ export function DocumentsPage() {
         setDocTypeMenuOpen(false);
       }
       if (!target.closest(".history-dropdown")) {
-        setOpenStatusDocId(null);
+        closeStatusDropdown();
       }
     }
     document.addEventListener("mousedown", closeOnOutsideClick);
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, []);
 
+  // Fixed-position panels don't move with the page/table the way position: absolute did, so
+  // scrolling while one's open would leave it visually stuck in place, detached from the row it
+  // came from — closing on any scroll (capture: true so it also catches the table's own
+  // horizontal-scroll wrapper, not just window-level scroll) avoids that.
+  useEffect(() => {
+    if (!openStatusDocId) return;
+    window.addEventListener("scroll", closeStatusDropdown, true);
+    return () => window.removeEventListener("scroll", closeStatusDropdown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openStatusDocId]);
+
   async function loadHistory(docId: string) {
     setLoadingHistoryFor(docId);
     try {
       const { data } = await apiClient.get<ExtractionRun[]>(`/tenants/${tenantId}/documents/${docId}/extraction-runs`);
       setHistoryByDoc((prev) => ({ ...prev, [docId]: data }));
+      // Reconcile the row's own status pill against this — a real GET, not an SSE push that can
+      // simply be missed (connection not open yet, dropped and reconnected mid-run, etc., with
+      // nothing to correct it afterward). Confirmed live: a document sat at PROCESSING in the row
+      // while this exact dropdown, opened moments later, already showed SUCCEEDED — the row was
+      // just never told. Runs are newest-first, so data[0] is the latest.
+      const latestStatus = data[0]?.status ?? null;
+      setPage((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          content: prev.content.map((d) =>
+            d.id === docId && d.latestExtractionRunStatus !== latestStatus
+              ? { ...d, latestExtractionRunStatus: latestStatus }
+              : d,
+          ),
+        };
+      });
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -84,12 +119,13 @@ export function DocumentsPage() {
     }
   }
 
-  function toggleStatusDropdown(docId: string) {
+  function toggleStatusDropdown(docId: string, trigger: HTMLElement) {
     if (openStatusDocId === docId) {
-      setOpenStatusDocId(null);
+      closeStatusDropdown();
       return;
     }
     setOpenStatusDocId(docId);
+    setStatusPanelPos(fixedPanelPositionBelow(trigger));
     loadHistory(docId);
   }
 
@@ -140,6 +176,22 @@ export function DocumentsPage() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, docTypeFilter, pageNumber]);
+
+  // Self-healing backstop for a row stuck showing PROCESSING because its SSE event never
+  // arrived (connection wasn't open yet when the run started/finished, dropped and reconnected
+  // mid-run, etc.) — confirmed live: a document's row stayed on PROCESSING indefinitely while
+  // its own status dropdown, fetched fresh, already showed SUCCEEDED (see loadHistory's own
+  // reconciliation for the case where that dropdown gets opened; this is for when it never is).
+  // Only polls while something's actually mid-run, and stops itself the moment nothing is.
+  useEffect(() => {
+    const hasProcessing = page?.content.some(
+      (d) => d.latestExtractionRunStatus === "PENDING" || d.latestExtractionRunStatus === "RUNNING",
+    );
+    if (!hasProcessing) return;
+    const handle = setInterval(load, 5000);
+    return () => clearInterval(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
 
   // Live status updates instead of needing a manual refresh — structured extraction now runs
   // asynchronously in the background (see ExtractionService#enqueueExtraction), so a document
@@ -195,8 +247,17 @@ export function DocumentsPage() {
         loadHistory(payload.documentId);
       }
     });
-    // Connection drops (e.g. server restart) are expected occasionally — EventSource
-    // reconnects on its own; nothing to handle here beyond not crashing the page.
+    // EventSource reconnects on its own after a drop (network blip, an app redeploy severing
+    // the connection, laptop sleep/wake) — but any event published during that gap is gone for
+    // good (broadcast only reaches emitters connected at the moment it fires, no replay/backlog
+    // — see DocumentEventService#broadcast), so a row can be left showing a stale status
+    // forever with nothing to correct it. onopen fires on the very first connection AND on every
+    // successful reconnect after a drop, so refreshing there resyncs immediately — much faster
+    // than waiting on the 5s self-healing poll below, which exists as a backstop for the rarer
+    // case where the connection itself never drops but a specific event still doesn't land.
+    source.onopen = () => {
+      load();
+    };
     source.onerror = () => {};
     return () => source.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -219,6 +280,12 @@ export function DocumentsPage() {
       // the SSE stream above. Opening the status dropdown lets the user actually watch it happen.
       await apiClient.post(`/tenants/${tenantId}/documents/${docId}/extraction-runs`);
       await load();
+      // Opened from the re-run button, not the status pill itself — no click event to anchor
+      // from here, so look up that row's status toggle by its data attribute instead.
+      const trigger = document.querySelector<HTMLElement>(`[data-status-toggle="${docId}"]`);
+      if (trigger) {
+        setStatusPanelPos(fixedPanelPositionBelow(trigger));
+      }
       setOpenStatusDocId(docId);
       await loadHistory(docId);
     } catch (err) {
@@ -466,7 +533,7 @@ export function DocumentsPage() {
                 <th>Uploaded</th>
                 <th>Type</th>
                 <th>Status</th>
-                <th></th>
+                <th className="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -502,13 +569,17 @@ export function DocumentsPage() {
                           type="button"
                           className="status-dropdown-toggle"
                           title="View live processing status"
-                          onClick={() => toggleStatusDropdown(d.id)}
+                          data-status-toggle={d.id}
+                          onClick={(e) => toggleStatusDropdown(d.id, e.currentTarget)}
                         >
                           <StatusPill status={displayStatus(d)} />
                           <span className="expand-chevron">{isStatusOpen ? "▲" : "▾"}</span>
                         </button>
-                        {isStatusOpen && (
-                          <div className="history-dropdown-panel">
+                        {isStatusOpen && statusPanelPos && (
+                          <div
+                            className="history-dropdown-panel"
+                            style={{ position: "fixed", top: statusPanelPos.top, right: statusPanelPos.right }}
+                          >
                             <div className="history-dropdown-panel-header">
                               <span className="muted" style={{ fontSize: 12 }}>
                                 Live status
@@ -516,7 +587,7 @@ export function DocumentsPage() {
                               <button
                                 className="icon-btn secondary"
                                 title="Close"
-                                onClick={() => setOpenStatusDocId(null)}
+                                onClick={closeStatusDropdown}
                               >
                                 ×
                               </button>
@@ -539,7 +610,7 @@ export function DocumentsPage() {
                         )}
                       </div>
                     </td>
-                    <td>
+                    <td className="col-actions">
                       <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>
                         {canEdit && (
                           <button

@@ -275,14 +275,24 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
                         authHeaders(fixture.ownerToken())),
                 Map.class);
 
-        // Explicit docType, so this does NOT auto-trigger at upload time (see DocumentService's
-        // upload javadoc) — this document has genuinely never been extracted until the activate
-        // call below reextracts it.
+        // Explicit docType matching v2 (the currently active version) — auto-triggers at upload
+        // time now (see DocumentService's upload javadoc), extracting nothing useful since v2's
+        // pattern can't match anything. Waited for here (not just at the end) so that run is
+        // unambiguously finished before the activate call below creates the real one — without
+        // this, the two async runs' completion order isn't guaranteed to match creation order,
+        // and the assertion below reads whichever extracted_data row is newest.
         UUID docId = uploadDoc(fixture, docType);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
 
+        // Automatic re-extraction on activate is dispatched asynchronously now (see
+        // BulkReextractionDispatcher) — the activate response can return before the new run row
+        // even exists yet, so waitForLatestRunToFinish alone could catch the OLD (already
+        // terminal) run above as "latest" and return prematurely. Capture the count first and
+        // wait for it to actually increase.
+        int runCountBeforeActivate = countRuns(fixture.tenantId(), fixture.ownerToken(), docId);
         rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType + "/versions/1/activate",
                 HttpMethod.POST, new HttpEntity<>(null, authHeaders(fixture.ownerToken())), Map.class);
-        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
+        waitForNewRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId, runCountBeforeActivate);
 
         ResponseEntity<List> dataRes = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",
@@ -300,10 +310,14 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
                 new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())),
                 Map.class);
-        // Both explicit docType, so neither auto-triggers at upload time — both sit unextracted
-        // until the manual reextract call below.
+        // Explicit docType matching an already-active rule set — both auto-trigger at upload
+        // time now (see DocumentService's upload javadoc). Waited for here so each is settled
+        // before the manual reextract call below creates a second run for each; the manual
+        // endpoint doesn't skip already-extracted documents, so the enqueued count is still 2.
         UUID docA = uploadDoc(fixture, docType);
         UUID docB = uploadDoc(fixture, docType);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docA);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docB);
 
         ResponseEntity<Map> res = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType + "/reextract",
@@ -338,7 +352,11 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         String docType = "it_invoice_" + uniqueSuffix();
         rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
                 new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())), Map.class);
+        // Explicit docType matching an already-active rule set auto-triggers at upload time now
+        // (see DocumentService's upload javadoc) — waited for so it's settled before the
+        // separate explicit trigger below, which this test actually means to exercise.
         UUID docId = uploadDoc(fixture, docType);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
 
         // Async now (see ExtractionService#enqueueExtraction): the POST itself only guarantees
         // a run was created, not that it finished — 202 + PENDING immediately, poll for the
@@ -448,12 +466,11 @@ class RuleSetsAndExtractionApiIT extends ApiTestBase {
         String docType = "it_invoice_" + uniqueSuffix();
         rest.exchange(baseUrl() + "/api/tenants/" + fixture.tenantId() + "/rule-sets/" + docType, HttpMethod.PUT,
                 new HttpEntity<>(Map.of("definition", sampleDefinition(docType)), authHeaders(fixture.ownerToken())), Map.class);
+        // Explicit docType matching an already-active rule set auto-triggers at upload time now
+        // (see DocumentService's upload javadoc) — no separate manual trigger needed to get a
+        // real extraction result here.
         UUID docId = uploadDoc(fixture, docType);
-        ResponseEntity<Map> triggerRes = rest.exchange(
-                baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extraction-runs",
-                HttpMethod.POST, new HttpEntity<>(authHeaders(fixture.ownerToken())), Map.class);
-        UUID runId = UUID.fromString((String) triggerRes.getBody().get("id"));
-        waitForTerminalRunStatus(fixture.tenantId(), fixture.ownerToken(), runId);
+        waitForLatestRunToFinish(fixture.tenantId(), fixture.ownerToken(), docId);
 
         ResponseEntity<List> res = rest.exchange(
                 baseUrl() + "/api/tenants/" + fixture.tenantId() + "/documents/" + docId + "/extracted-data",

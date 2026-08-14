@@ -246,6 +246,45 @@ public abstract class ApiTestBase {
         throw new AssertionError("No extraction run appeared for document " + documentId + " within 5s");
     }
 
+    /** Current number of extraction runs for a document — see waitForNewRunToFinish's own javadoc for why a caller would want this before triggering another one. */
+    @SuppressWarnings("unchecked")
+    protected int countRuns(UUID tenantId, String token, UUID documentId) {
+        ResponseEntity<List> res = rest.exchange(
+                baseUrl() + "/api/tenants/" + tenantId + "/documents/" + documentId + "/extraction-runs",
+                HttpMethod.GET, new HttpEntity<>(authHeaders(token)), List.class);
+        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return res.getBody() == null ? 0 : res.getBody().size();
+    }
+
+    /**
+     * Like waitForLatestRunToFinish, but for callers that trigger a run indirectly via something
+     * now dispatched asynchronously (e.g. RuleSetController's automatic re-extraction on
+     * save/activate, via BulkReextractionDispatcher) — the HTTP response can return before the
+     * new run row even exists yet, not just before it finishes. waitForLatestRunToFinish alone
+     * is unsafe here: polling immediately after such a call can catch an OLDER, already-terminal
+     * run as "latest" and return prematurely, before the actually-relevant new run has even been
+     * created (confirmed live as a real test failure — asserted on stale data from the run
+     * before the one this test cared about). Pass the run count from countRuns() taken before
+     * triggering whatever should create the new one.
+     */
+    protected void waitForNewRunToFinish(UUID tenantId, String token, UUID documentId, int priorRunCount) {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            if (countRuns(tenantId, token, documentId) > priorRunCount) {
+                waitForLatestRunToFinish(tenantId, token, documentId);
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+        throw new AssertionError("No new extraction run appeared for document " + documentId + " within 5s"
+                + " (still at " + priorRunCount + ")");
+    }
+
     /**
      * Sets TenantContext, calls into the (genuinely separate, Spring-proxied) CleanupService
      * bean, then clears it — the same pattern AuthController#selectTenant and

@@ -74,12 +74,37 @@ export function FieldSelect({ tenantId, docType, value, onChange }: Props) {
 
   return (
     <div className="field-select" ref={containerRef}>
-      <input
-        placeholder="field"
-        value={value === ANY_FIELD ? "Any field" : value}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={handleFocus}
-      />
+      <div className="select-wrapper">
+        <input
+          placeholder="field"
+          value={value === ANY_FIELD ? "Any field" : value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={handleFocus}
+        />
+        {value && (
+          <button
+            type="button"
+            className="select-wrapper-clear"
+            title="Clear"
+            onClick={() => {
+              onChange("");
+              setOpen(true);
+            }}
+          >
+            ×
+          </button>
+        )}
+        <button
+          type="button"
+          className="select-wrapper-chevron"
+          title="Show suggestions"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? "▲" : "▾"}
+        </button>
+      </div>
       {open && (
         <div className="field-select-panel">
           <div

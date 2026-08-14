@@ -4,8 +4,10 @@ import { apiClient, errorMessage } from "../api/client";
 import type { AuditLogEntry, DocumentSummary, Member, Page } from "../api/types";
 import { DocumentThumbnail } from "../components/DocumentThumbnail";
 import { DocumentIcon, InfoIcon } from "../components/icons";
+import { fixedPanelPositionBelow, type FixedPosition } from "../utils/floatingPosition";
 
-const PAGE_SIZE = 20;
+// Consistent with every other paginated list in the app (Documents, Search).
+const PAGE_SIZE = 10;
 
 // The fixed, known set of entityType values every @Audited/AuditService.record call in the
 // backend actually uses — not fetched dynamically, since these are stable category names
@@ -93,8 +95,14 @@ export function AuditLogPage() {
   const [pageNumber, setPageNumber] = useState(0);
   const [category, setCategory] = useState("DOCUMENT");
   const [openGroupKey, setOpenGroupKey] = useState<string | null>(null);
+  const [groupPanelPos, setGroupPanelPos] = useState<FixedPosition | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  function closeGroupDropdown() {
+    setOpenGroupKey(null);
+    setGroupPanelPos(null);
+  }
 
   useEffect(() => {
     apiClient
@@ -105,7 +113,7 @@ export function AuditLogPage() {
 
   useEffect(() => {
     setLoading(true);
-    setOpenGroupKey(null);
+    closeGroupDropdown();
     Promise.all([
       apiClient.get<Page<AuditLogEntry>>(`/tenants/${tenantId}/audit-log`, {
         params: { entityType: category, page: pageNumber, size: PAGE_SIZE },
@@ -125,12 +133,21 @@ export function AuditLogPage() {
     function closeOnOutsideClick(e: globalThis.MouseEvent) {
       const target = e.target as Element;
       if (!target.closest(".history-dropdown")) {
-        setOpenGroupKey(null);
+        closeGroupDropdown();
       }
     }
     document.addEventListener("mousedown", closeOnOutsideClick);
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, []);
+
+  // Same fixed-position-escapes-the-scroll-wrapper-clipping fix as the Documents page, and the
+  // same close-on-scroll reasoning (a fixed panel doesn't move with the row it came from).
+  useEffect(() => {
+    if (!openGroupKey) return;
+    window.addEventListener("scroll", closeGroupDropdown, true);
+    return () => window.removeEventListener("scroll", closeGroupDropdown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openGroupKey]);
 
   const docsById = new Map(documents.map((d) => [d.id, d]));
   const membersById = new Map(members.map((m) => [m.userId, m]));
@@ -231,12 +248,22 @@ export function AuditLogPage() {
                           <button
                             className="history-dropdown-toggle"
                             title={`View all ${group.entries.length} events for this document`}
-                            onClick={() => setOpenGroupKey(isOpen ? null : group.key)}
+                            onClick={(e) => {
+                              if (isOpen) {
+                                closeGroupDropdown();
+                              } else {
+                                setOpenGroupKey(group.key);
+                                setGroupPanelPos(fixedPanelPositionBelow(e.currentTarget));
+                              }
+                            }}
                           >
                             {group.entries.length} events {isOpen ? "▲" : "▾"}
                           </button>
-                          {isOpen && (
-                            <div className="history-dropdown-panel">
+                          {isOpen && groupPanelPos && (
+                            <div
+                              className="history-dropdown-panel"
+                              style={{ position: "fixed", top: groupPanelPos.top, right: groupPanelPos.right }}
+                            >
                               <div className="history-dropdown-panel-header">
                                 <span className="muted" style={{ fontSize: 12 }}>
                                   History
@@ -244,7 +271,7 @@ export function AuditLogPage() {
                                 <button
                                   className="icon-btn secondary"
                                   title="Close"
-                                  onClick={() => setOpenGroupKey(null)}
+                                  onClick={closeGroupDropdown}
                                 >
                                   ×
                                 </button>

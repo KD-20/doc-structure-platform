@@ -257,7 +257,10 @@ export function DocumentDetailPage() {
       <div className="card">
         <div className="doc-detail-status-row" onClick={() => setShowRuns((s) => !s)}>
           <h2 style={{ fontSize: 15, margin: 0 }}>Extraction runs</h2>
-          <span className="muted">
+          <span className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* With only one run there's nothing to browse — showing its status here means
+                seeing it doesn't require expanding a collapsed table for a single row. */}
+            {runs.length === 1 && <StatusPill status={runs[0].status} />}
             {runs.length} {showRuns ? "▲" : "▾"}
           </span>
         </div>
@@ -293,7 +296,8 @@ export function DocumentDetailPage() {
       <div className="card">
         <div className="doc-detail-status-row" onClick={() => setShowFields((s) => !s)}>
           <h2 style={{ fontSize: 15, margin: 0 }}>Structured fields</h2>
-          <span className="muted">
+          <span className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {extracted.length === 1 && <StatusPill status={extracted[0].status} />}
             {extracted.length} {showFields ? "▲" : "▾"}
           </span>
         </div>

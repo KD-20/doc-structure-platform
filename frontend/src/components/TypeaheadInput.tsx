@@ -67,6 +67,16 @@ export function TypeaheadInput({
             ×
           </button>
         )}
+        <button
+          type="button"
+          className="select-wrapper-chevron"
+          title="Show suggestions"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? "▲" : "▾"}
+        </button>
       </div>
       {open && filtered.length > 0 && (
         <div className="typeahead-menu">

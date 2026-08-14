@@ -17,6 +17,9 @@ function matchPercent(textRank: number): number {
   return Math.min(100, Math.round(textRank * 100));
 }
 
+// Consistent with every other paginated list in the app (Documents, Audit Log).
+const PAGE_SIZE = 10;
+
 export function SearchPage() {
   const { tenantId } = useParams();
   const [q, setQ] = useState("");
@@ -24,6 +27,7 @@ export function SearchPage() {
   const [semanticQuery, setSemanticQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilter[]>([]);
   const [result, setResult] = useState<SearchResponse | null>(null);
+  const [pageNumber, setPageNumber] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Doc types actually present in this tenant's documents, offered as the full <select> list.
@@ -71,9 +75,13 @@ export function SearchPage() {
   }
 
   // Takes an optional docType override so selecting a new type can search immediately with
-  // it, rather than firing one request against the about-to-be-stale state value and a
-  // second once the state catches up.
-  async function runSearch(docTypeOverride?: string) {
+  // it, rather than firing one request against the about-to-be-stale state value and a second
+  // once the state catches up. pageOverride is how Prev/Next navigate — any other call (a new
+  // search, a changed filter/doc type) omits it and implicitly restarts at page 1, since the
+  // previous result set no longer applies.
+  async function runSearch(docTypeOverride?: string, pageOverride?: number) {
+    const targetPage = pageOverride ?? 0;
+    setPageNumber(targetPage);
     setError(null);
     setLoading(true);
     try {
@@ -84,6 +92,8 @@ export function SearchPage() {
           docType: (docTypeOverride ?? docType) || undefined,
           semanticQuery: semanticQuery || undefined,
           filters: activeFilters.length > 0 ? JSON.stringify(activeFilters) : undefined,
+          page: targetPage,
+          size: PAGE_SIZE,
         },
       });
       setResult(data);
@@ -106,21 +116,36 @@ export function SearchPage() {
         </div>
         <div className="form-row" style={{ maxWidth: 240 }}>
           <label>Document type</label>
-          <select
-            value={docType}
-            onChange={(e) => {
-              const value = e.target.value;
-              setDocType(value);
-              runSearch(value);
-            }}
-          >
-            <option value="">All types</option>
-            {docTypeSuggestions.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
+          <div className="select-wrapper">
+            <select
+              value={docType}
+              onChange={(e) => {
+                const value = e.target.value;
+                setDocType(value);
+                runSearch(value);
+              }}
+            >
+              <option value="">All types</option>
+              {docTypeSuggestions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            {docType && (
+              <button
+                type="button"
+                className="select-wrapper-clear"
+                title="Clear (back to All types)"
+                onClick={() => {
+                  setDocType("");
+                  runSearch("");
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
         </div>
 
         <label style={{ fontSize: 13, color: "var(--muted)", display: "block", marginBottom: 10 }}>
@@ -215,6 +240,29 @@ export function SearchPage() {
               </div>
             ))}
           </div>
+          {result.items.length === 0 && <p className="muted">No results.</p>}
+
+          {result.totalElements > PAGE_SIZE && (
+            <div className="pagination-controls">
+              <button
+                className="secondary"
+                disabled={pageNumber === 0 || loading}
+                onClick={() => runSearch(undefined, pageNumber - 1)}
+              >
+                ← Previous
+              </button>
+              <span className="muted">
+                Page {pageNumber + 1} of {Math.ceil(result.totalElements / PAGE_SIZE)}
+              </span>
+              <button
+                className="secondary"
+                disabled={pageNumber + 1 >= Math.ceil(result.totalElements / PAGE_SIZE) || loading}
+                onClick={() => runSearch(undefined, pageNumber + 1)}
+              >
+                Next →
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

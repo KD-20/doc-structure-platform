@@ -41,4 +41,32 @@ public class AsyncConfig {
                 executor.getCorePoolSize(), executor.getMaxPoolSize(), 200);
         return executor;
     }
+
+    /**
+     * Backs BulkReextractionService#reextractByDocTypeAsync — deliberately a separate pool from
+     * extractionExecutor, not a shared one: that pool's job is real per-document extraction work
+     * (can legitimately run long, one document at a time), while this one just finds documents
+     * matching a doc type and enqueues each — an administrative dispatch step that should never
+     * sit queued behind a burst of actual extraction work. Sharing the pool was tried first and
+     * caused exactly that: under concurrent load, saving a rule set (which triggers this) could
+     * be delayed well past what an admin would expect from an action that's supposed to return
+     * immediately, confirmed live via test flakiness once both used the same pool.
+     */
+    @Bean("bulkReextractionExecutor")
+    public Executor bulkReextractionExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(50);
+        executor.setThreadNamePrefix("bulk-reextract-");
+        executor.setRejectedExecutionHandler((task, exec) -> {
+            log.warn("bulk re-extraction executor saturated (active={}, queued={}) — running on caller thread",
+                    exec.getActiveCount(), exec.getQueue().size());
+            task.run();
+        });
+        executor.initialize();
+        log.info("bulk re-extraction executor initialized core={} max={} queueCapacity={}",
+                executor.getCorePoolSize(), executor.getMaxPoolSize(), 50);
+        return executor;
+    }
 }

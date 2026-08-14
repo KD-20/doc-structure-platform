@@ -1,6 +1,7 @@
 package com.docstructure.platform.rules;
 
 import com.docstructure.platform.auth.AppPrincipal;
+import com.docstructure.platform.extraction.BulkReextractionDispatcher;
 import com.docstructure.platform.extraction.BulkReextractionService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -24,10 +25,13 @@ public class RuleSetController {
 
     private final RuleSetService ruleSetService;
     private final BulkReextractionService bulkReextractionService;
+    private final BulkReextractionDispatcher bulkReextractionDispatcher;
 
-    public RuleSetController(RuleSetService ruleSetService, BulkReextractionService bulkReextractionService) {
+    public RuleSetController(RuleSetService ruleSetService, BulkReextractionService bulkReextractionService,
+                              BulkReextractionDispatcher bulkReextractionDispatcher) {
         this.ruleSetService = ruleSetService;
         this.bulkReextractionService = bulkReextractionService;
+        this.bulkReextractionDispatcher = bulkReextractionDispatcher;
     }
 
     @PreAuthorize("@tenantAccess.isCurrentTenant(#tenantId) and hasRole('VIEWER')")
@@ -66,7 +70,9 @@ public class RuleSetController {
                                                            @Valid @RequestBody CreateRuleSetVersionRequest request,
                                                            @AuthenticationPrincipal AppPrincipal principal) {
         ExtractionRuleSet rs = ruleSetService.createVersion(tenantId, docType, request.definition(), principal.userId());
-        bulkReextractionService.reextractByDocType(tenantId, docType, principal.userId());
+        // Async — see BulkReextractionDispatcher's own javadoc — so this response doesn't wait
+        // on how many existing documents of this type there are.
+        bulkReextractionDispatcher.reextractByDocTypeAsync(tenantId, docType, principal.userId());
         return ResponseEntity.status(HttpStatus.CREATED).body(RuleSetResponse.from(rs, request.definition()));
     }
 
@@ -75,7 +81,7 @@ public class RuleSetController {
     public RuleSetResponse activate(@PathVariable UUID tenantId, @PathVariable String docType,
                                      @PathVariable int version, @AuthenticationPrincipal AppPrincipal principal) {
         ExtractionRuleSet rs = ruleSetService.activateVersion(tenantId, docType, version);
-        bulkReextractionService.reextractByDocType(tenantId, docType, principal.userId());
+        bulkReextractionDispatcher.reextractByDocTypeAsync(tenantId, docType, principal.userId());
         return RuleSetResponse.from(rs, ruleSetService.parseDefinition(rs));
     }
 

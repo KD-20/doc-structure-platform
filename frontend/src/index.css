@@ -141,6 +141,29 @@ h1, h2, h3 {
   margin-bottom: 20px;
 }
 
+.back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 0;
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+
+.back-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.back-button:hover {
+  color: var(--text);
+}
+
 .badge {
   display: inline-block;
   padding: 2px 8px;
@@ -216,21 +239,25 @@ input, select, textarea {
   height: 16px;
 }
 
-/* Free-text input backed by a <datalist> plus a clear button — once the value matches a
-   suggestion exactly, most browsers only show that single option on reopen, so this is the
-   reliable way back to the full list (or to blank) rather than manually clearing the text. */
+/* Free-text input with a suggestions dropdown underneath (not a native <select>, since these
+   allow a custom/unlisted value too) — a chevron marks it as a dropdown the same way a native
+   select is, and a clear button appears once there's a value so clearing it doesn't require
+   selecting and deleting the whole word by hand. Padding-right always reserves room for both
+   icons (rather than only once a value exists) so the input's usable width doesn't visibly
+   shift when the clear button appears/disappears. */
 .select-wrapper {
   position: relative;
 }
 
-.select-wrapper input {
+.select-wrapper input,
+.select-wrapper select {
   width: 100%;
-  padding-right: 28px;
+  padding-right: 50px;
 }
 
 .select-wrapper-clear {
   position: absolute;
-  right: 6px;
+  right: 24px;
   top: 50%;
   transform: translateY(-50%);
   background: none;
@@ -244,6 +271,24 @@ input, select, textarea {
 
 .select-wrapper-clear:hover {
   color: var(--danger);
+}
+
+.select-wrapper-chevron {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.select-wrapper-chevron:hover {
+  color: var(--text);
 }
 
 .typeahead {
@@ -333,6 +378,7 @@ table {
 
 th, td {
   text-align: left;
+  vertical-align: middle;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
 }
@@ -340,6 +386,14 @@ th, td {
 th {
   color: var(--muted);
   font-weight: 600;
+}
+
+/* Applied to a table's trailing "actions" column (buttons, icon buttons) on every page that has
+   one — Documents, Rule Sets, etc. — so those buttons consistently hug the right edge of the
+   table instead of sitting wherever the previous column's content happens to end. Put this class
+   on both the <th> and every <td> in that column. */
+.col-actions {
+  text-align: right;
 }
 
 .status-pill {
@@ -383,10 +437,86 @@ th {
   align-items: center;
   justify-content: center;
   background: var(--bg);
+  /* Subtle dot grid instead of a flat fill — the same trick auth pages on Documenso/Cal.com use
+     (a faint background pattern behind a centered card), done here in pure CSS rather than a
+     shipped image so it stays crisp at any size and costs nothing to load. */
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 .auth-card {
-  width: 360px;
+  width: 380px;
+  padding: 36px 32px;
+  box-shadow: 0 20px 48px -12px var(--shadow-tint);
+  border-radius: 16px;
+}
+
+.auth-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  width: fit-content;
+  text-decoration: none;
+  color: inherit;
+  transition: opacity 0.15s;
+}
+
+.auth-logo:hover {
+  opacity: 0.75;
+}
+
+.auth-logo-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 10px;
+  background: var(--primary);
+  color: var(--bg-soft);
+}
+
+.auth-logo-mark svg {
+  width: 20px;
+  height: 20px;
+}
+
+.auth-card h1 {
+  margin: 0;
+  font-size: 26px;
+}
+
+.auth-subtitle {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 6px 0 24px;
+}
+
+.auth-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auth-card .form-row input {
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+.auth-card button[type="submit"] {
+  margin-top: 8px;
+  padding: 11px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.auth-footer {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  text-align: center;
 }
 
 pre.json-view {
@@ -1040,6 +1170,18 @@ pre.json-view {
   color: var(--primary);
 }
 
+/* Same box dimensions as .history-dropdown-toggle (padding + border), transparent border instead
+   of a visible one — for a row that has no history to show a button for (e.g. "No custom
+   versions"). Without this, that cell is just a bare line of text with no padding/border, making
+   its row shorter than every row that does have a real toggle button — the whole table's rows
+   end up uneven heights instead of a consistent grid. */
+.history-empty-placeholder {
+  display: inline-block;
+  border: 1px solid transparent;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
 /* Status column's dropdown toggle: unlike history-dropdown-toggle, this wraps a StatusPill
    (which already carries its own color) rather than plain text, so it stays a bare, borderless
    button — just enough padding/gap to make the pill + chevron feel like one clickable unit. */
@@ -1129,6 +1271,10 @@ pre.json-view {
 .field-select {
   position: relative;
   display: inline-block;
+  /* Explicit width, not just shrink-to-fit: the input inside is now wrapped in .select-wrapper
+     (width: 100%) for the chevron/clear icons, and an auto-width ancestor around a 100%-width
+     child has no well-defined size to shrink-to-fit against. */
+  width: 200px;
 }
 
 .field-select-panel {
