@@ -1,19 +1,16 @@
 package com.docstructure.platform.search;
 
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 
 /**
- * Mirrors GeminiEmbeddingProvider's condition on the same property rather than
- * @ConditionalOnMissingBean(EmbeddingProvider.class) — condition evaluation order between plain
- * @Component-scanned beans (as opposed to @Bean methods in an @Configuration class) isn't
- * guaranteed, and @ConditionalOnMissingBean silently excluded both beans in practice. See
- * docs/DECISIONS.md.
+ * The only EmbeddingProvider bean in this codebase — semantic search is a real, wired seam
+ * (SearchService's query path, the pgvector column/index) but nothing generates embeddings
+ * today. Adding a real provider later is a new @Component implementing this interface, gated
+ * behind whatever config property makes sense for it. See docs/DECISIONS.md.
  */
 @Component
-@ConditionalOnProperty(name = "platform.embeddings.enabled", havingValue = "false", matchIfMissing = true)
 public class NoOpEmbeddingProvider implements EmbeddingProvider {
     @Override
     public boolean isEnabled() {

@@ -125,7 +125,7 @@ export type ExtractionRunStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"
 export interface ExtractionRun {
   id: string;
   documentId: string;
-  strategy: "RULE_BASED" | "LLM";
+  strategy: "RULE_BASED";
   status: ExtractionRunStatus;
   startedAt: string | null;
   completedAt: string | null;
@@ -230,7 +230,7 @@ export interface PublicDocument {
 
 export interface PublicExtractionRun {
   id: string;
-  strategy: "RULE_BASED" | "LLM";
+  strategy: "RULE_BASED";
   status: ExtractionRunStatus;
   startedAt: string | null;
   completedAt: string | null;

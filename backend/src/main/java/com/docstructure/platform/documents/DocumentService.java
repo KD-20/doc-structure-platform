@@ -7,12 +7,8 @@ import com.docstructure.platform.extraction.DocTypeClassifier;
 import com.docstructure.platform.extraction.ExtractionRunRepository;
 import com.docstructure.platform.extraction.ExtractionRunStatus;
 import com.docstructure.platform.extraction.ExtractionService;
-import com.docstructure.platform.extraction.ExtractionStrategyFactory;
-import com.docstructure.platform.extraction.LlmExtractionStrategy;
 import com.docstructure.platform.rules.RuleSetService;
 import com.docstructure.platform.storage.StorageService;
-import com.docstructure.platform.tenancy.Tenant;
-import com.docstructure.platform.tenancy.TenantRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
@@ -41,8 +37,6 @@ public class DocumentService {
     private final DocTypeClassifier docTypeClassifier;
     private final ExtractionService extractionService;
     private final ExtractionRunRepository extractionRunRepository;
-    private final ExtractionStrategyFactory extractionStrategyFactory;
-    private final TenantRepository tenantRepository;
     private final DocumentEventService documentEventService;
     private final MeterRegistry meterRegistry;
     private final RuleSetService ruleSetService;
@@ -50,8 +44,7 @@ public class DocumentService {
     public DocumentService(DocumentRepository documentRepository, StorageService storageService,
                             TikaTextExtractor textExtractor, DocTypeClassifier docTypeClassifier,
                             ExtractionService extractionService, ExtractionRunRepository extractionRunRepository,
-                            ExtractionStrategyFactory extractionStrategyFactory,
-                            TenantRepository tenantRepository, DocumentEventService documentEventService,
+                            DocumentEventService documentEventService,
                             MeterRegistry meterRegistry, RuleSetService ruleSetService) {
         this.documentRepository = documentRepository;
         this.storageService = storageService;
@@ -59,8 +52,6 @@ public class DocumentService {
         this.docTypeClassifier = docTypeClassifier;
         this.extractionService = extractionService;
         this.extractionRunRepository = extractionRunRepository;
-        this.extractionStrategyFactory = extractionStrategyFactory;
-        this.tenantRepository = tenantRepository;
         this.documentEventService = documentEventService;
         this.meterRegistry = meterRegistry;
         this.ruleSetService = ruleSetService;
@@ -85,9 +76,8 @@ public class DocumentService {
      * was left for classification, so a with-no-doc-type upload still ends up embedded for
      * semantic/fuzzy search via RuleBasedExtractionStrategy's UNSTRUCTURED fallback — it just
      * can't be miscategorized as a specific business type it was never told and can't safely
-     * infer. A tenant configured for LLM extraction (which never needs a rule set for any doc
-     * type) always auto-triggers too, explicit docType or not. An explicitly-typed upload also
-     * auto-triggers when a rule set (tenant-custom or platform default) actually resolves for
+     * infer. An explicitly-typed upload also auto-triggers when a rule set (tenant-custom or
+     * platform default) actually resolves for
      * that docType — the uploader named a real, working type, there's no reason to make them
      * click "run" separately (confirmed live as a real gap: uploading with docType "resume",
      * which already has a working custom rule set, silently sat at "Structured — Not yet run"
@@ -163,7 +153,7 @@ public class DocumentService {
 
         // See the method javadoc for exactly which case this covers and which it doesn't.
         boolean shouldAutoTrigger = status == DocumentStatus.TEXT_EXTRACTED
-                && (wasClassified || usesLlmExtraction(tenantId) || hasResolvableRuleSet(tenantId, docType));
+                && (wasClassified || hasResolvableRuleSet(tenantId, docType));
         if (shouldAutoTrigger) {
             try {
                 // Async now (see ExtractionService#enqueueExtraction) — doc stays at
@@ -182,18 +172,6 @@ public class DocumentService {
         meterRegistry.counter("documents.uploaded", "status", status.name()).increment();
         documentEventService.publishStatusChange(tenantId, doc.getId(), doc.getStatus(), doc.getDocType());
         return DocumentSummaryResponse.from(doc, latestRunStatus(tenantId, doc.getId()));
-    }
-
-    private boolean usesLlmExtraction(UUID tenantId) {
-        try {
-            Tenant tenant = tenantRepository.findById(tenantId).orElse(null);
-            return tenant != null && extractionStrategyFactory.resolve(tenant.getSettings()) instanceof LlmExtractionStrategy;
-        } catch (RuntimeException e) {
-            // Misconfigured strategy (e.g. tenant set to LLM but platform.extraction.llm.enabled
-            // is false) — treat as "not LLM" here; a real extraction attempt surfaces the
-            // actual error rather than this best-effort upload-time check.
-            return false;
-        }
     }
 
     /**

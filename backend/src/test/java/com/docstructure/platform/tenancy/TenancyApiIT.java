@@ -125,9 +125,9 @@ class TenancyApiIT extends ApiTestBase {
         // @NotNull on a JsonNode-typed field doesn't reject a JSON `null` literal — Jackson
         // deserializes it to NullNode.getInstance() (a real object, not a Java null), so bean
         // validation sees a non-null field and passes (confirmed live: this used to be asserted
-        // as a 400 here and actually came back 200). Not a bug: every downstream reader
-        // (e.g. ExtractionStrategyFactory#resolve) uses tenantSettings.hasNonNull(...), which
-        // is null-safe against NullNode the same way it's null-safe against a literal null.
+        // as a 400 here and actually came back 200). Not a bug: any downstream reader of
+        // tenant.settings uses tenantSettings.hasNonNull(...), which is null-safe against
+        // NullNode the same way it's null-safe against a literal null.
         TenantFixture fixture = createTenantWithOwner();
         Map<String, Object> req = new HashMap<>();
         req.put("settings", null);

@@ -13,7 +13,6 @@ import com.docstructure.platform.search.ExtractedData;
 import com.docstructure.platform.search.ExtractedDataRepository;
 import com.docstructure.platform.search.ExtractedDataStatus;
 import com.docstructure.platform.search.VectorLiterals;
-import com.docstructure.platform.tenancy.Tenant;
 import com.docstructure.platform.tenancy.TenantRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -49,7 +48,7 @@ public class ExtractionService {
     private final TenantRepository tenantRepository;
     private final ExtractionRunRepository runRepository;
     private final ExtractedDataRepository extractedDataRepository;
-    private final ExtractionStrategyFactory strategyFactory;
+    private final ExtractionStrategy extractionStrategy;
     private final RuleSetService ruleSetService;
     private final ObjectMapper objectMapper;
     private final AuditService auditService;
@@ -62,7 +61,7 @@ public class ExtractionService {
 
     public ExtractionService(DocumentRepository documentRepository, TenantRepository tenantRepository,
                               ExtractionRunRepository runRepository, ExtractedDataRepository extractedDataRepository,
-                              ExtractionStrategyFactory strategyFactory, RuleSetService ruleSetService,
+                              ExtractionStrategy extractionStrategy, RuleSetService ruleSetService,
                               ObjectMapper objectMapper, AuditService auditService,
                               DocumentEventService documentEventService, EmbeddingProvider embeddingProvider,
                               EntityManager entityManager, ApplicationEventPublisher eventPublisher,
@@ -71,7 +70,7 @@ public class ExtractionService {
         this.tenantRepository = tenantRepository;
         this.runRepository = runRepository;
         this.extractedDataRepository = extractedDataRepository;
-        this.strategyFactory = strategyFactory;
+        this.extractionStrategy = extractionStrategy;
         this.ruleSetService = ruleSetService;
         this.auditService = auditService;
         this.objectMapper = objectMapper;
@@ -85,11 +84,8 @@ public class ExtractionService {
 
     /**
      * Fast path, runs synchronously in the caller's request: validates the document/tenant,
-     * resolves the extraction strategy (misconfiguration — e.g. tenant set to LLM while
-     * platform.extraction.llm.enabled=false — fails loudly here, before any run row exists or
-     * background work is scheduled, since that's a deployment issue the caller should see
-     * immediately), creates the PENDING run, and publishes ExtractionRequestedEvent for
-     * ExtractionWorker to pick up once this transaction commits.
+     * creates the PENDING run, and publishes ExtractionRequestedEvent for ExtractionWorker to
+     * pick up once this transaction commits.
      */
     @TenantScoped
     @Transactional
@@ -99,22 +95,19 @@ public class ExtractionService {
         if (document.getRawText() == null || document.getRawText().isBlank()) {
             throw new ApiExceptions.ValidationException("Document has no extracted text to structure yet");
         }
-        Tenant tenant = tenantRepository.findById(tenantId)
-                .orElseThrow(() -> new ApiExceptions.NotFoundException("Tenant not found"));
-
-        ExtractionStrategy strategy = strategyFactory.resolve(tenant.getSettings());
-        ExtractionStrategyType strategyType = strategy instanceof LlmExtractionStrategy
-                ? ExtractionStrategyType.LLM : ExtractionStrategyType.RULE_BASED;
+        if (!tenantRepository.existsById(tenantId)) {
+            throw new ApiExceptions.NotFoundException("Tenant not found");
+        }
 
         ExtractionRun run = new ExtractionRun();
         run.setTenantId(tenantId);
         run.setDocumentId(documentId);
-        run.setStrategy(strategyType);
+        run.setStrategy(ExtractionStrategyType.RULE_BASED);
         run.setStatus(ExtractionRunStatus.PENDING);
         run = runRepository.save(run);
 
-        log.info("extraction enqueued run={} document={} tenant={} strategy={} triggeredBy={}",
-                run.getId(), documentId, tenantId, strategyType, triggeredByUserId);
+        log.info("extraction enqueued run={} document={} tenant={} triggeredBy={}",
+                run.getId(), documentId, tenantId, triggeredByUserId);
         documentEventService.publishExtractionStatus(tenantId, documentId, ExtractionRunStatus.PENDING);
         eventPublisher.publishEvent(new ExtractionRequestedEvent(tenantId, documentId, run.getId(), triggeredByUserId));
         return ExtractionRunResponse.from(run);
@@ -142,8 +135,7 @@ public class ExtractionService {
             failureRecorder.recordFailure(tenantId, documentId, runId, "Document not found");
             return;
         }
-        Tenant tenant = tenantRepository.findById(tenantId).orElse(null);
-        if (tenant == null) {
+        if (!tenantRepository.existsById(tenantId)) {
             log.warn("tenant={} not found when running extraction run={}", tenantId, runId);
             failureRecorder.recordFailure(tenantId, documentId, runId, "Tenant not found");
             return;
@@ -157,24 +149,21 @@ public class ExtractionService {
         documentEventService.publishExtractionStatus(tenantId, documentId, ExtractionRunStatus.RUNNING);
         Timer.Sample sample = Timer.start(meterRegistry);
 
-        ExtractionStrategy strategy = strategyFactory.resolve(tenant.getSettings());
         try {
-            if (run.getStrategy() == ExtractionStrategyType.RULE_BASED) {
-                // Considers the tenant's own active rule set first, falling back to a
-                // platform-shipped default for this doc type when the tenant has none — see
-                // RuleSetService#resolveDefinition. ruleSetId stays null both when only a
-                // default applies (it references extraction_rule_sets, tenant rows only) and
-                // when no rule set exists at all — RuleBasedExtractionStrategy no longer treats
-                // that second case as a failure (see its own javadoc), it just returns an
-                // UNSTRUCTURED result with no fields, and this run still runs to completion.
-                run.setRuleSetId(ruleSetService.findActive(tenantId, document.getDocType())
-                        .map(rs -> rs.getId())
-                        .orElse(null));
-            }
+            // Considers the tenant's own active rule set first, falling back to a
+            // platform-shipped default for this doc type when the tenant has none — see
+            // RuleSetService#resolveDefinition. ruleSetId stays null both when only a default
+            // applies (it references extraction_rule_sets, tenant rows only) and when no rule
+            // set exists at all — RuleBasedExtractionStrategy no longer treats that second case
+            // as a failure (see its own javadoc), it just returns an UNSTRUCTURED result with no
+            // fields, and this run still runs to completion.
+            run.setRuleSetId(ruleSetService.findActive(tenantId, document.getDocType())
+                    .map(rs -> rs.getId())
+                    .orElse(null));
 
             ExtractionContext context = new ExtractionContext(tenantId, documentId, document.getDocType(),
                     document.getRawText());
-            ExtractionResult result = strategy.extract(context);
+            ExtractionResult result = extractionStrategy.extract(context);
             boolean isStructured = result.status() != ExtractedDataStatus.UNSTRUCTURED;
 
             run.setStatus(ExtractionRunStatus.SUCCEEDED);

@@ -51,19 +51,6 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      # Off by default, and even once on, no tenant uses it until it opts in via
-      # tenant.settings.extractionStrategy="LLM" — the platform-wide default stays
-      # RULE_BASED (see application.yml). Set LLM_ENABLED=true + GROQ_API_KEY in .env.
-      PLATFORM_EXTRACTION_LLM_ENABLED: ${LLM_ENABLED:-false}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
-      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
-      # Real semantic search. Off by default (NoOpEmbeddingProvider). Set
-      # EMBEDDINGS_ENABLED=true + GEMINI_API_KEY in .env to turn it on.
-      PLATFORM_EMBEDDINGS_ENABLED: ${EMBEDDINGS_ENABLED:-false}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
-      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
     volumes:
       - documents_storage:/data/documents
     ports:

@@ -1,7 +1,6 @@
 package com.docstructure.platform.config;
 
 import com.docstructure.platform.common.ApiExceptions;
-import com.docstructure.platform.extraction.ExtractionStrategyUnavailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -36,11 +35,6 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ApiExceptions.UnauthorizedException.class)
     public ResponseEntity<Object> handleUnauthorized(ApiExceptions.UnauthorizedException ex) {
         return body(HttpStatus.UNAUTHORIZED, ex.getMessage());
-    }
-
-    @ExceptionHandler(ExtractionStrategyUnavailableException.class)
-    public ResponseEntity<Object> handleExtractionStrategyUnavailable(ExtractionStrategyUnavailableException ex) {
-        return body(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
     }
 
     private ResponseEntity<Object> body(HttpStatus status, String message) {

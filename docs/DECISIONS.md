@@ -48,17 +48,17 @@ A second real bug, also only caught by writing an actual integration test: Postg
 
 ---
 
-## 3. Extraction: rules-first for v1, LLM as a wired-but-inert seam
+## 3. Extraction: rules-first for v1, behind a config-driven strategy seam
 
-**Alternatives:** LLM-first extraction (Claude API) for every document; a hybrid that tries rules then falls back to an LLM.
+**Alternatives:** LLM-first extraction (an LLM API call) for every document; a hybrid that tries rules then falls back to an LLM.
 
-**Why chosen:** The user explicitly asked for rules-first with a real, working seam to add an LLM strategy later purely via configuration — deterministic, zero external dependency/cost, fully auditable field-by-field output for v1, with the extension point built so a future LLM strategy requires zero changes to `ExtractionService`, `ExtractionStrategyFactory`, or the API.
+**Why chosen:** The user explicitly asked for rules-first with a real, working seam to add an LLM strategy later purely via configuration — deterministic, zero external dependency/cost, fully auditable field-by-field output for v1, with the extension point built so a future strategy requires zero changes to `ExtractionService` or the API.
 
-**Mechanism:** `ExtractionStrategy` interface; `RuleBasedExtractionStrategy` is the only bean registered by default. `LlmExtractionStrategy` implements the same interface, is annotated `@ConditionalOnProperty(platform.extraction.llm.enabled)`, and is genuinely not registered as a Spring bean until that flag flips — this isn't a stub that's silently selected, it's absent from the `Map<String, ExtractionStrategy>` `ExtractionStrategyFactory` resolves against. A tenant configured for `LLM` while the bean is absent gets a loud `ExtractionStrategyUnavailableException` (503), never a silent fallback to rules.
+**Mechanism:** `ExtractionStrategy` interface; `RuleBasedExtractionStrategy` is the only bean, injected directly wherever extraction runs — there's no factory/registry layer today, since a single implementation doesn't need one. A second strategy is added as its own `@Component` implementing `ExtractionStrategy`, gated behind whatever config property makes sense for it (a `@ConditionalOnProperty` flag, a per-tenant setting resolved by a small factory bean — same pattern §5a uses for embeddings). That's the "config-driven" part: the choice of strategy lives in configuration, not in `ExtractionService`'s code.
 
-**Why declined (hybrid):** Adds meaningful complexity (when does a rule "fail" enough to justify an LLM call? per-field or per-document?) that isn't needed until there's a real LLM implementation to hybridize with.
+**Why declined (hybrid):** Adds meaningful complexity (when does a rule "fail" enough to justify an LLM call? per-field or per-document?) that isn't needed until there's a real second strategy to hybridize with.
 
-**Revisit trigger:** Implementing `LlmExtractionStrategy` for real.
+**Revisit trigger:** Implementing a real second `ExtractionStrategy`.
 
 ### 3a. Doc type is auto-classified, not typed by the uploader
 
@@ -71,6 +71,14 @@ A second real bug, also only caught by writing an actual integration test: Postg
 **Known limitation:** Classification runs once, at upload time, against whatever rule sets are active *then*. A rule set created afterward doesn't retroactively reclassify existing `unclassified` documents — they'd need re-upload or a manual extraction trigger once their content happens to match. An explicitly-provided `docType` (still accepted by the API) always overrides classification.
 
 **Revisit trigger:** If false classifications become common enough to need a confidence display/override step in the UI before extraction runs automatically, rather than trusting the auto-run.
+
+### 3b. A real LLM extraction strategy or embedding provider is a config-driven addition, not a code rewrite
+
+`ExtractionStrategy` and `EmbeddingProvider` are the extension points: adding real semantic search or LLM-based extraction is implementing one interface as a new `@Component`, gating it behind a config property (a `@ConditionalOnProperty` flag, or a per-tenant setting resolved by a small factory bean — same pattern either seam can use), and flipping that config on. Zero changes to `ExtractionService`, `SearchService`, or the API contract either way — that's the whole point of routing both through an interface instead of calling a specific vendor directly.
+
+`RuleBasedExtractionStrategy` and `NoOpEmbeddingProvider` are the only implementations registered today. Earlier versions of this project also shipped a concrete Groq-backed `LlmExtractionStrategy` and a concrete `GeminiEmbeddingProvider`, both genuinely functional, not stubs. Neither was ever actually turned on for a tenant in practice (confirmed live: no tenant ever set `extractionStrategy: "LLM"`; `extracted_data.embedding` stayed `NULL` for every row), and neither had any automated test coverage of its own (semantic search itself *is* well-tested, but only through `DeterministicEmbeddingProvider`, a local test double, never the real Gemini call). They were removed to keep the extraction/search code path easier to read — the seam they validated is what's documented here, and standing this back up when there's a real need is the config-driven step above, not a redesign.
+
+**Revisit trigger:** A real, concrete need for LLM-based extraction or semantic search — implement the relevant interface then, informed by actual requirements at the time.
 
 ---
 
@@ -98,7 +106,7 @@ A second real bug, also only caught by writing an actual integration test: Postg
 
 ### 5a. Semantic search is a real, wired, currently-inert seam — not a TODO
 
-`EmbeddingProvider` interface ships with `NoOpEmbeddingProvider` (`@Primary`, `isEnabled() = false`). The `embedding` column, its index, and `SearchService`'s query path all exist and are exercised by the same code that will run once a real provider is added — but nothing in v1 ever calls an embeddings API, so `extracted_data.embedding` stays `NULL` for every row. A `semanticQuery` search param returns `semanticSearchAvailable: false` and silently falls back to full-text/structured results rather than erroring. Enabling it later is one new `EmbeddingProvider` bean gated by `platform.embeddings.enabled=true` — zero changes to `SearchService` or the API contract. This is stated explicitly in the README so it doesn't read as a broken feature.
+`EmbeddingProvider` interface ships with `NoOpEmbeddingProvider` (the only bean today, `isEnabled() = false`). The `embedding` column, its index, and `SearchService`'s query path all exist and are exercised by the same code that will run once a real provider is added — proven out end-to-end in tests via `DeterministicEmbeddingProvider` (a local, deterministic stand-in that generates real vectors and runs the real cosine-distance query, no network call) — but nothing in production ever calls an embeddings API, so `extracted_data.embedding` stays `NULL` for every row. A `semanticQuery` search param returns `semanticSearchAvailable: false` and silently falls back to full-text/structured results rather than erroring. Enabling it later is one new `EmbeddingProvider` bean (typically `@Primary`, or gated behind a new config property) — zero changes to `SearchService` or the API contract. See §3b — this is a config-driven addition, not a rewrite, whenever a real provider is needed. This is stated explicitly in the README so it doesn't read as a broken feature.
 
 ### 5a-i. Every document with usable text gets embedded, not just ones matching a rule set
 
@@ -258,7 +266,7 @@ The `db` service's host port defaults to `5433` and `app`'s to `8081` (both over
 
 - **No refresh-token rotation / server-side logout** (§7) — single access token, client-side discard only.
 - **Semantic search is wired but inert** (§5a) — `NoOpEmbeddingProvider` until a real provider is added.
-- **LLM extraction is wired but inert** (§3) — `LlmExtractionStrategy` throws `UnsupportedOperationException` until implemented.
+- **Only one extraction strategy is registered** (§3, §3b) — the config-driven seam (`ExtractionStrategy`) is real; adding LLM-based extraction is a new `@Component` plus a config flag, not a redesign.
 - **Bulk re-extraction on a rule set change is not batched** (§10a) — one query loads every matching document at once, one transaction enqueues all of them; fine at v1 volumes, a real limit for a tenant with a very large number of documents of one doc type.
 - **Table extraction (`TABLE_UNDER_HEADING`) is heuristic** — splits on runs of 2+ whitespace characters; irregular whitespace or wrapped cells will misparse.
 - **OCR quality depends on Tesseract being present** — bundled in the Docker image, must be installed separately for non-Docker local dev (see README).

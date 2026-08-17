@@ -140,15 +140,11 @@ them via a `.env` file next to `docker-compose.yml` or your shell environment.
 | `MAIL_ENABLED` | Turn on emailing guest links (see below) | `false` |
 | `MAIL_FROM` | "From" address on those emails | `no-reply@example.com` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP relay credentials — required if `MAIL_ENABLED=true` | unset |
-| `LLM_ENABLED` | Register the LLM extraction strategy bean (see "Free LLM extraction" below) | `false` |
-| `GROQ_API_KEY` | Groq API key — required if `LLM_ENABLED=true` | unset |
-| `GROQ_MODEL` / `GROQ_BASE_URL` | Override the model or point at an OpenAI-compatible endpoint other than Groq | `llama-3.3-70b-versatile` / Groq's API |
 
 Backend-only variables (set directly, not typically needed for the Docker path since the
-Dockerfile/compose file already wire them): `PLATFORM_EXTRACTION_DEFAULT_STRATEGY` (`RULE_BASED`),
-`PLATFORM_EXTRACTION_LLM_ENABLED` (`false`), `PLATFORM_EMBEDDINGS_ENABLED` (`false`),
-`PLATFORM_STORAGE_BASE_PATH` (`/data/documents` in Docker), `PLATFORM_PUBLIC_DEMO_ENABLED`
-(`true` — see "Anonymous trial mode" below), `PLATFORM_PUBLIC_DEMO_MAX_UPLOADS` (`5`).
+Dockerfile/compose file already wire them): `PLATFORM_STORAGE_BASE_PATH` (`/data/documents` in
+Docker), `PLATFORM_PUBLIC_DEMO_ENABLED` (`true` — see "Anonymous trial mode" below),
+`PLATFORM_PUBLIC_DEMO_MAX_UPLOADS` (`5`).
 
 ### Emailing guest links
 
@@ -185,43 +181,28 @@ Available field strategies: `ANCHOR_REGEX` (find anchor text, regex-match a wind
 heading, splitting on 2+ whitespace runs). Available normalizers: `DATE`, `CURRENCY`, or omit
 for no normalization.
 
-## Free LLM extraction (zero-config field detection)
+## Extraction and semantic search are config-driven seams, not hardcoded to one provider
 
-For document types with no rule set at all: `LlmExtractionStrategy` sends the document's raw
-text to an LLM and lets it decide for itself which fields matter and what their values are —
-no one has to define field names, anchor text, or patterns first. It calls
-[Groq](https://console.groq.com/keys) (free tier, OpenAI-compatible API) directly over HTTP, no
-SDK dependency.
+Both extraction and semantic search are built behind small interfaces so a real cloud/LLM
+provider can be dropped in later purely via configuration, with zero changes to
+`ExtractionService`, `SearchService`, or the API contract:
 
-**Off by default everywhere**, and enabling it doesn't change any existing tenant's behavior —
-the platform-wide default extraction strategy stays `RULE_BASED` regardless:
+- **Extraction** — `ExtractionStrategy` interface; `RuleBasedExtractionStrategy` is the only
+  implementation today. A new strategy (an LLM call, for instance) is added by implementing the
+  interface as its own `@Component`, gated behind whatever config property makes sense for it.
+- **Semantic search** — `EmbeddingProvider` interface; `NoOpEmbeddingProvider` is the only
+  implementation today (`isEnabled() = false`), so the `Search` page's semantic-query field
+  always returns `semanticSearchAvailable: false` and falls back to full-text/structured
+  results. The `extracted_data.embedding` column and its `pgvector` index already exist. A real
+  provider is a new `@Component` implementing `EmbeddingProvider` (typically `@Primary` so it
+  takes over from `NoOpEmbeddingProvider`) — no `SearchService` or API changes needed.
 
-1. Get a free API key at [console.groq.com/keys](https://console.groq.com/keys).
-2. In a `.env` file next to `docker-compose.yml`:
-   ```
-   LLM_ENABLED=true
-   GROQ_API_KEY=gsk_...your key...
-   ```
-   Then `docker compose up -d --build`.
-3. **Per tenant**, opt in: `PATCH /api/tenants/{id}/settings` with body
-   `{"settings": {"extractionStrategy": "LLM"}}`. Only that tenant's documents use it; every
-   other tenant keeps using its own rule sets exactly as before. Uploads auto-trigger
-   extraction immediately, same as a confident rule-based match does.
-
-To go back to rule sets for a tenant: PATCH its settings back to `{}` (or omit
-`extractionStrategy`). See `com.docstructure.platform.extraction.LlmExtractionStrategy` and
-[`docs/DECISIONS.md §3`](docs/DECISIONS.md) for how the seam is structured if you want to swap
-in a different provider (OpenAI, Anthropic, Gemini, or a local Ollama model all work the same
-way — it's a plain HTTP call, not tied to Groq specifically).
-
-## Semantic search: today vs. future
-
-The `Search` page has a semantic-query field today — it's a real, wired code path, not fake UI.
-Right now it always returns `semanticSearchAvailable: false` and falls back to full-text/
-structured results, because nothing generates embeddings yet (`NoOpEmbeddingProvider`). The
-`extracted_data.embedding` column and its `pgvector` index already exist. Enabling real semantic
-search later is one new `EmbeddingProvider` bean gated by `platform.embeddings.enabled=true` —
-zero API changes. See [`docs/DECISIONS.md §5a`](docs/DECISIONS.md).
+Earlier versions of this project shipped concrete Groq (LLM extraction) and Gemini (embeddings)
+implementations behind these same seams. Both were removed — neither was ever actually enabled
+for a tenant in practice, and unused cloud-API integration code was making the extraction/search
+path harder to follow for no real benefit. The interfaces and the "config turns it on, zero
+call-site changes" design are unchanged; see
+[`docs/DECISIONS.md §3`](docs/DECISIONS.md) and [`§5a`](docs/DECISIONS.md) for the reasoning.
 
 ## Local development without Docker
 

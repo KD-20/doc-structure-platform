@@ -8,9 +8,9 @@ import org.springframework.stereotype.Service;
 
 /**
  * Real implementation, only registered when platform.mail.enabled=true — see application.yml
- * for the SMTP_* environment variables this needs (host/port/username/password), same pattern
- * as LlmExtractionStrategy: absent by default, no-op-free deployments never instantiate this
- * or its JavaMailSender dependency, so nothing breaks when SMTP isn't configured.
+ * for the SMTP_* environment variables this needs (host/port/username/password). Absent by
+ * default; no-op-free deployments never instantiate this or its JavaMailSender dependency, so
+ * nothing breaks when SMTP isn't configured.
  */
 @Service
 @ConditionalOnProperty(name = "platform.mail.enabled", havingValue = "true")

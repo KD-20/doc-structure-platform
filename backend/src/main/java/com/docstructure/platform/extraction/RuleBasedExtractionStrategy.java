@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-@Component("RULE_BASED")
+@Component
 public class RuleBasedExtractionStrategy implements ExtractionStrategy {
 
     private final RuleSetService ruleSetService;

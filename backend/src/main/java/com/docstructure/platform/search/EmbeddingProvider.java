@@ -3,9 +3,9 @@ package com.docstructure.platform.search;
 import java.util.Optional;
 
 /**
- * Seam for semantic search. NoOpEmbeddingProvider registers only when no other implementation
- * is present (@ConditionalOnMissingBean) — GeminiEmbeddingProvider takes over once
- * platform.embeddings.enabled=true and an API key is configured. See docs/DECISIONS.md.
+ * Seam for semantic search. NoOpEmbeddingProvider is the only bean in this codebase today; a
+ * real provider is added by implementing this interface as its own @Component (typically
+ * @Primary or gated behind a config property so it takes over from NoOp). See docs/DECISIONS.md.
  */
 public interface EmbeddingProvider {
     boolean isEnabled();

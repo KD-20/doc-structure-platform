@@ -99,24 +99,6 @@ platform:
   jwt:
     secret: ${PLATFORM_JWT_SECRET:dev-only-secret-change-me-dev-only-secret-change-me}
     access-token-minutes: ${PLATFORM_JWT_ACCESS_MINUTES:60}
-  extraction:
-    # Platform-wide default stays RULE_BASED even once LLM is enabled below — existing tenants
-    # with tuned rule sets (anchor text, table columns, normalizers) keep that precise
-    # behavior. A tenant opts into LLM per-tenant via PATCH .../settings {"extractionStrategy":"LLM"}.
-    default-strategy: ${PLATFORM_EXTRACTION_DEFAULT_STRATEGY:RULE_BASED}
-    llm:
-      enabled: ${PLATFORM_EXTRACTION_LLM_ENABLED:false}
-      api-key: ${GROQ_API_KEY:}
-      model: ${GROQ_MODEL:llama-3.3-70b-versatile}
-      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
-  embeddings:
-    # Real semantic search: GeminiEmbeddingProvider takes over from NoOpEmbeddingProvider once
-    # enabled. outputDimensionality is pinned to 1536 to match the existing
-    # extracted_data.embedding VECTOR(1536) column — no migration needed.
-    enabled: ${PLATFORM_EMBEDDINGS_ENABLED:false}
-    api-key: ${GEMINI_API_KEY:}
-    model: ${GEMINI_EMBEDDING_MODEL:gemini-embedding-001}
-    base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
   mail:
     enabled: ${PLATFORM_MAIL_ENABLED:false}
     from: ${PLATFORM_MAIL_FROM:no-reply@example.com}

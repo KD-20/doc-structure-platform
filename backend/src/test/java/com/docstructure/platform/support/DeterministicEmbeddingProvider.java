@@ -6,8 +6,8 @@ import java.util.Locale;
 import java.util.Optional;
 
 /**
- * A real, deterministic (no network, no API key) stand-in for GeminiEmbeddingProvider — bag-of-
- * words hashed into a 1536-dim vector (same dimensionality as the real extracted_data.embedding
+ * A real, deterministic (no network, no API key) stand-in for a real cloud embedding provider —
+ * bag-of-words hashed into a 1536-dim vector (same dimensionality as the real extracted_data.embedding
  * column, so no schema mismatch), L2-normalized. This is not a mock: it's genuinely exercised
  * end-to-end against real Postgres/pgvector, including the actual cosine-distance query in
  * SearchQueryBuilder — only the vector *source* is fake, so tests can verify the full

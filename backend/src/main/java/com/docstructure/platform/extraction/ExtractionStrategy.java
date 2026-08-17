@@ -1,6 +1,8 @@
 package com.docstructure.platform.extraction;
 
-/** RuleBasedExtractionStrategy is the only bean registered in v1; LlmExtractionStrategy implements this same interface but is @ConditionalOnProperty-disabled — see ExtractionStrategyFactory and docs/DECISIONS.md. */
+/** RuleBasedExtractionStrategy is the only implementation. A new strategy (e.g. an LLM-backed one)
+ * is added by implementing this interface as its own @Component, gated behind whatever config
+ * property makes sense for it — see docs/DECISIONS.md. */
 public interface ExtractionStrategy {
     ExtractionResult extract(ExtractionContext context);
 }
