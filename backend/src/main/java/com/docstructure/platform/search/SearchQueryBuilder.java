@@ -44,6 +44,16 @@ class SearchQueryBuilder {
     // one fixed threshold for every semantic query, matching what was asked for.
     static final double SEMANTIC_SIMILARITY_THRESHOLD = 0.70;
 
+    // Floor on TsQueryExpr.RANK for a genuine full-text/fuzzy query (q, or a semantic query
+    // running through the literal-text fallback when no embedding provider is configured —
+    // see SearchService). Deliberately NOT the same value as SEMANTIC_SIMILARITY_THRESHOLD:
+    // ts_rank/word_similarity use a much lower-valued scale than cosine similarity, and
+    // TsQueryExpr's own SUBSTRING_MATCH tier is intentionally fixed at 0.3 as the weakest
+    // legitimate match — a 0.70 floor here would exclude that entire tier and most genuine
+    // ts_rank matches, leaving full-text search returning almost nothing. This is low enough
+    // to keep real matches (including the 0.3 substring tier) while cutting near-zero noise.
+    static final double FULLTEXT_MATCH_MIN_SCORE = 0.15;
+
     record BuiltPredicate(String sql, Map<String, Object> params) {
     }
 
@@ -58,7 +68,8 @@ class SearchQueryBuilder {
      * the bottom of a DESC rank ordering.
      */
     BuiltPredicate build(UUID tenantId, String docType, String q, List<SearchFilter> filters,
-                          List<UUID> restrictToDocumentIds, String queryEmbeddingLiteral) {
+                          List<UUID> restrictToDocumentIds, String queryEmbeddingLiteral,
+                          double textMatchMinScore) {
         StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("tenantId", tenantId);
@@ -84,8 +95,10 @@ class SearchQueryBuilder {
             params.put("docType", docType);
         }
         if (q != null && !q.isBlank()) {
-            where.append(" AND ").append(TsQueryExpr.MATCHES_QUERY);
+            where.append(" AND ").append(TsQueryExpr.MATCHES_QUERY)
+                    .append(" AND (").append(TsQueryExpr.RANK).append(") >= :textMatchMinScore");
             params.put("q", q);
+            params.put("textMatchMinScore", textMatchMinScore);
         }
         if (filters != null) {
             int i = 0;

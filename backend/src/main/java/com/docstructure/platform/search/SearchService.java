@@ -98,8 +98,17 @@ public class SearchService {
         // zero results when X is right there in the document text is worse than an honest,
         // clearly-flagged approximation — semanticSearchAvailable still reports false either
         // way, see SearchPage's disclaimer). Doesn't override an explicit q the user also typed.
-        String effectiveQ = (q != null && !q.isBlank()) ? q
-                : (semanticRequested && !semanticAvailable) ? semanticQuery : q;
+        boolean isSemanticFallback = (q == null || q.isBlank()) && semanticRequested && !semanticAvailable;
+        String effectiveQ = (q != null && !q.isBlank()) ? q : (isSemanticFallback ? semanticQuery : q);
+
+        // A semantic query held to full-text's normal (much lower) bar would show weak
+        // substring-only hits as if they were confidently "similar" — held to the same 0.70
+        // floor real semantic search uses instead, so the fallback stays honest about what it
+        // actually found. Real full-text search keeps its own, appropriately-scaled floor —
+        // see SearchQueryBuilder.FULLTEXT_MATCH_MIN_SCORE for why 0.70 there would break it.
+        double textMatchMinScore = isSemanticFallback
+                ? SearchQueryBuilder.SEMANTIC_SIMILARITY_THRESHOLD
+                : SearchQueryBuilder.FULLTEXT_MATCH_MIN_SCORE;
 
         if (effectiveQ != null && !effectiveQ.isBlank()) {
             // Postgres's own default (0.6) misses common typos like letter transpositions
@@ -112,8 +121,8 @@ public class SearchService {
         }
 
         String queryEmbeddingLiteral = semanticAvailable ? VectorLiterals.toLiteral(queryEmbedding.get()) : null;
-        SearchQueryBuilder.BuiltPredicate predicate =
-                queryBuilder.build(tenantId, docType, effectiveQ, filters, restrictToDocumentIds, queryEmbeddingLiteral);
+        SearchQueryBuilder.BuiltPredicate predicate = queryBuilder.build(tenantId, docType, effectiveQ, filters,
+                restrictToDocumentIds, queryEmbeddingLiteral, textMatchMinScore);
 
         String textRankExpr = (effectiveQ != null && !effectiveQ.isBlank())
                 ? TsQueryExpr.RANK
