@@ -105,8 +105,9 @@ first login in any real deployment. There is no password-reset flow in v1 — se
 ## Anonymous trial mode ("try it before you subscribe")
 
 Separate from Guest Links (which share *specific* documents an admin already uploaded): anyone
-can go to **`/try`** (linked from the login page) and upload their own documents with no
-account at all. Uploads land in one shared "Public Demo" tenant seeded automatically on first
+can go to **`/try`** (linked as "Try without an account" from the home page, `/`) and upload
+their own documents with no account at all. Uploads land in one shared "Public Demo" tenant
+seeded automatically on first
 boot (`PublicDemoInitializer`), scoped per-browser by a random id the frontend generates into
 `localStorage` and sends as `X-Device-Id` — no cookies, no login. Deliberately limited:
 
