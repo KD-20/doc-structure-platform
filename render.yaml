@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: doc-structure-platform
+    runtime: docker
+    plan: free
+    # Repo root as build context, since the Dockerfile COPYs both backend/ and frontend/
+    # relative to the repo root (see backend/Dockerfile) — same as the local docker-compose
+    # build, just without compose orchestrating a second `db` container. Postgres here is
+    # external (Supabase or any other host) since Render's free tier has no persistent disk
+    # a self-hosted `db` container could use anyway. See README "Deploying to a shared URL".
+    dockerfilePath: backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: docker
+      # Render injects its own PORT by default (10000); the app's server.port is fixed at
+      # 8080 (see application.yml), so this tells Render's proxy which port to route to
+      # instead of expecting the app to read PORT itself.
+      - key: PORT
+        value: "8080"
+      # Ephemeral container filesystem — no persistent disk on the free plan. Accepted
+      # tradeoff: uploaded files' original bytes don't survive a restart/redeploy, but
+      # extracted text/structured fields (Postgres) do, so search and all structured data
+      # stay intact regardless. See docs/DECISIONS.md §6.
+      - key: PLATFORM_STORAGE_BASE_PATH
+        value: /data/documents
+      - key: PLATFORM_BOOTSTRAP_ENABLED
+        value: "true"
+      - key: PLATFORM_BOOTSTRAP_ADMIN_EMAIL
+        value: admin@example.com
+      - key: PLATFORM_BOOTSTRAP_ADMIN_PASSWORD
+        generateValue: true
+      # Must be at least 64 bytes so JJWT's Keys.hmacShaKeyFor picks HS512 reliably — paste
+      # the output of `openssl rand -base64 64` when Render prompts for this. See README.
+      - key: PLATFORM_JWT_SECRET
+        sync: false
+      # Runtime connection, MUST be the non-superuser app_user role — RLS is a no-op for a
+      # superuser/table-owner connection. Password here also becomes app_user's actual
+      # Postgres password (see application.yml's flyway.placeholders.appDbPassword).
+      - key: SPRING_DATASOURCE_USERNAME
+        value: app_user
+      - key: SPRING_DATASOURCE_PASSWORD
+        generateValue: true
+      # External Postgres connection details — paste your Supabase (or other host)
+      # project's connection string/credentials when Render prompts for these. Use the
+      # direct connection (port 5432), not a transaction-mode pooler: this app relies on
+      # set_config(..., true) being scoped to the same physical connection Hibernate holds
+      # for a transaction, which transaction-pooling can break. See README.
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      # The migration-time superuser-equivalent role (Supabase's project role is literally
+      # named "postgres") — needed once at each deploy to run Flyway (CREATE EXTENSION /
+      # CREATE ROLE), deliberately different from the app_user runtime connection above.
+      - key: SPRING_FLYWAY_USER
+        sync: false
+      - key: SPRING_FLYWAY_PASSWORD
+        sync: false
